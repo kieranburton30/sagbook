@@ -1,6 +1,6 @@
 // SagBook: suspension setup log. Plain JS, no build step.
 // tools/update.ps1 rewrites APP_VERSION on every publish.
-const APP_VERSION = '2026.10.05-2258';
+const APP_VERSION = '2026.10.05-2259';
 const PSI_PER_BAR = 14.5038;
 const PARTS = [['fork', 'Fork'], ['shock', 'Shock']];
 
@@ -743,14 +743,16 @@ async function registerSW() {
   if (!('serviceWorker' in navigator)) return;
   // Skip on the local dev server so edits show up immediately.
   if (['localhost', '127.0.0.1'].includes(location.hostname) && !new URLSearchParams(location.search).has('sw')) return;
-  const hadController = !!navigator.serviceWorker.controller;
+  // The first controller after a fresh install isn't an update.
+  let hadController = !!navigator.serviceWorker.controller;
   swReg = await navigator.serviceWorker.register('sw.js');
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') swReg.update().catch(() => {});
   });
   let reloading = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (!hadController || reloading) return;
+    if (!hadController) { hadController = true; return; }
+    if (reloading) return;
     if (dirty) { pendingReload = true; toast('Update ready — it applies after you save'); return; }
     reloading = true;
     sessionStorage.setItem('sagbook-updated', '1');
