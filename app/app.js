@@ -1,6 +1,6 @@
 // SagBook: suspension setup log. Plain JS, no build step.
 // tools/update.ps1 rewrites APP_VERSION on every publish.
-const APP_VERSION = '2026.10.05-2257';
+const APP_VERSION = '2026.10.05-2258';
 const PSI_PER_BAR = 14.5038;
 const PARTS = [['fork', 'Fork'], ['shock', 'Shock']];
 
