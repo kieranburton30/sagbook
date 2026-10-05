@@ -1,6 +1,6 @@
 // SagBook: suspension setup log. Plain JS, no build step.
 // tools/update.ps1 rewrites APP_VERSION on every publish.
-const APP_VERSION = '2026.10.05-2259';
+const APP_VERSION = '2026.10.06-0020';
 const PSI_PER_BAR = 14.5038;
 const PARTS = [['fork', 'Fork'], ['shock', 'Shock']];
 
@@ -171,11 +171,60 @@ const backBtn = (href = '#/') => `<a class="icon-btn" href="${href}" aria-label=
 const seg = (action, key, value, options) => `<div class="seg">${options.map(([v, label]) =>
   `<button type="button" class="${v === value ? 'on' : ''}" data-action="${action}" data-key="${key}" data-value="${v}">${label}</button>`).join('')}</div>`;
 
+/* ---------- install ---------- */
+
+let installPrompt = null;
+const isInstalled = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const isPhone = () => /Android|iPhone|iPad/i.test(navigator.userAgent);
+const installHidden = () => { try { return localStorage.getItem('sagbook-hide-install') === '1'; } catch { return false; } };
+
+// Explains how to install from whichever browser the page was opened in.
+function installSteps() {
+  const ua = navigator.userAgent;
+  if (/iPhone|iPad/i.test(ua)) return 'In Safari, tap <b>Share</b> → <b>Add to Home Screen</b>.';
+  if (/; wv\)|FBAN|FBAV|Instagram|GSA\//i.test(ua)) {
+    return 'This page is open inside another app, which can\'t install apps. Tap <b>⋮</b> → <b>Open in Chrome</b>, then come back to this card.';
+  }
+  if (/SamsungBrowser/i.test(ua)) {
+    return 'Open this page in <b>Chrome</b> instead of Samsung Internet (copy the address into Chrome). Chrome installs SagBook as a proper app, which is needed for quick launch.';
+  }
+  if (/Android/i.test(ua)) return 'Tap <b>⋮</b> (top right of Chrome) → <b>Add to Home screen</b> → <b>Install</b>.';
+  return 'Click the <b>install icon</b> at the right end of the address bar in Chrome or Edge.';
+}
+
+function installCard(compact) {
+  if (isInstalled()) return '';
+  if (compact && installHidden()) return '';
+  return `<section class="card install">
+    <div class="install-head"><img src="icons/icon-192.png" alt="" width="44" height="44">
+      <div><h3>Install SagBook</h3><p class="muted">Home-screen icon, opens instantly, works offline.</p></div>
+      ${compact ? '<button type="button" class="icon-btn subtle" data-action="hide-install" aria-label="Hide">✕</button>' : ''}
+    </div>
+    ${installPrompt
+      ? '<button type="button" class="btn primary block" data-action="install">Install app</button>'
+      : `<p class="steps">${installSteps()}</p>`}
+    ${!isPhone() && !compact ? `<div class="qr"><img src="icons/qr.svg" alt="QR code for the SagBook link" width="160" height="160">
+      <p class="muted">Scan with your phone's camera to open SagBook there.</p></div>` : ''}
+  </section>`;
+}
+
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  installPrompt = e;
+  if (!dirty && state) rerenderKeepScroll();
+});
+window.addEventListener('appinstalled', () => {
+  installPrompt = null;
+  toast('SagBook installed — open it from your home screen');
+  if (!dirty && state) rerenderKeepScroll();
+});
+
 /* ---------- view: home ---------- */
 
 function viewHome() {
   if (!state.bikes.length) {
     return `${header('SagBook', '', `<a class="icon-btn" href="#/settings" aria-label="Settings">${ICON.gear}</a>`)}
+    ${installCard(true)}
     <main class="empty">
       <h2>No bikes yet</h2>
       <p class="muted">Add a bike with its fork and shock, then log every setup change.</p>
@@ -192,6 +241,7 @@ function viewHome() {
   return `${header('SagBook', '', `<a class="icon-btn" href="#/settings" aria-label="Settings">${ICON.gear}</a>`)}
   ${chips}
   <main>
+    ${installCard(true)}
     <div class="bike-title"><h2>${esc(bike.name)}</h2><a class="link" href="#/bike/${bike.id}">${ICON.edit} Edit</a></div>
     ${PARTS.map(([part, label]) => (bike[part] ? setupCard(bike, part, label, cur?.[part]) : '')).join('')}
     ${!bike.fork && !bike.shock ? `<p class="muted pad">No fork or shock set up yet. <a class="link" href="#/bike/${bike.id}">Edit bike</a></p>` : ''}
@@ -509,6 +559,16 @@ function viewSettings() {
   const s = state.settings;
   return `${header('Settings', backBtn())}
   <main>
+    ${installCard(false)}
+    <section class="card">
+      <h3>Quick launch</h3>
+      <p class="muted">Open SagBook from anywhere with a double-press, no hunting for the icon. Install the app first, then:</p>
+      <ul class="tips">
+        <li><b>Samsung:</b> Settings → Advanced features → Side button → <b>Double press</b> → Open app → <b>SagBook</b>.</li>
+        <li><b>Pixel:</b> Settings → System → Gestures → <b>Quick Tap</b> → Open app → <b>SagBook</b>, then double-tap the back of the phone.</li>
+        <li><b>Any phone:</b> long-press the SagBook icon → drag <b>Log change</b> onto your home screen for a one-tap shortcut.</li>
+      </ul>
+    </section>
     <section class="card">
       <h3>Units</h3>
       <div class="field"><span>Air pressure</span>${seg('setting', 'pressureUnit', s.pressureUnit, [['psi', 'psi'], ['bar', 'bar']])}</div>
@@ -589,6 +649,12 @@ function parseHash() {
 
 function render() {
   const { parts: [view, id], params } = parseHash();
+  // "#/log" on its own (the home-screen shortcut) logs for the last-used bike.
+  if (view === 'log' && !id) {
+    const bike = bikeById(state.settings.lastBikeId) || state.bikes[0];
+    location.replace(bike ? `#/log/${bike.id}` : '#/');
+    return;
+  }
   let html;
   if (view === 'log') html = form && form.bikeId === id && !form.editId ? viewLog() : startForm(id, { fromId: params.get('from') }) ? viewLog() : viewMissing();
   else if (view === 'edit') html = form && form.editId === id ? viewLog() : (entryById(id) && startForm(entryById(id).bikeId, { editId: id })) ? viewLog() : viewMissing();
@@ -680,6 +746,16 @@ document.addEventListener('click', async (ev) => {
     exportData();
   } else if (action === 'check-update') {
     checkForUpdate();
+  } else if (action === 'install') {
+    if (!installPrompt) return;
+    installPrompt.prompt();
+    await installPrompt.userChoice;
+    installPrompt = null;
+    rerenderKeepScroll();
+  } else if (action === 'hide-install') {
+    try { localStorage.setItem('sagbook-hide-install', '1'); } catch { /* ignore */ }
+    toast('Install instructions are still in Settings');
+    rerenderKeepScroll();
   }
 });
 

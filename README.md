@@ -7,9 +7,20 @@ air pressure, volume spacers, compression, rebound and sag, for multiple bikes.
 
 ## Install on your phone (once)
 
-1. Open the link above in **Chrome** on your Android phone.
-2. Tap the **⋮** menu → **Add to Home screen** → **Install**.
+1. Double-click **`Open SagBook.cmd`** on the PC and scan the QR code with
+   your phone's camera (or open the link above in **Chrome** on the phone).
+   If the link opens inside another app, use **⋮ → Open in Chrome** first.
+2. Tap **Install app** on the orange card (or Chrome **⋮** → **Add to Home
+   screen** → **Install**).
 3. Open SagBook from the home-screen icon. It works offline from then on.
+
+## Quick launch (double-press)
+
+- **Samsung:** Settings → Advanced features → Side button → Double press →
+  Open app → SagBook.
+- **Pixel:** Settings → System → Gestures → Quick Tap → Open app → SagBook.
+- **Any phone:** long-press the SagBook icon and drag **Log change** onto the
+  home screen.
 
 ## Updating the app from the PC
 

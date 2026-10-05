@@ -192,6 +192,21 @@ textarea { resize: vertical; }
 .list-item svg { color: var(--muted); flex: none; }
 .card > p { margin: 0 0 8px; font-size: 14px; }
 
+/* install + quick launch */
+.install { border-color: var(--accent); }
+.install-head { display: flex; align-items: center; gap: 12px; }
+.install-head img { border-radius: 10px; flex: none; }
+.install-head > div { flex: 1; min-width: 0; }
+.install-head h3 { font-size: 16px; }
+.install-head p { margin: 2px 0 0; font-size: 14px; }
+.steps { margin: 12px 0 0; padding: 10px 12px; border-radius: 10px; background: var(--field); font-size: 15px; }
+.qr { display: flex; align-items: center; gap: 14px; margin-top: 12px; }
+.qr img { background: #fff; border-radius: 8px; padding: 6px; flex: none; }
+.qr p { margin: 0; font-size: 14px; }
+.tips { margin: 0; padding-left: 18px; font-size: 14px; }
+.tips li { margin-bottom: 8px; }
+.empty + .card, header + .card.install { margin-top: 4px; }
+
 /* empty state */
 .empty { text-align: center; padding: 18vh 12px 0; }
 .empty h2 { font-size: 24px; margin-bottom: 8px; }
