@@ -1,8 +1,7 @@
-// SagBook: suspension setup log. Plain JS, no build step.
+// SagBook: suspension dial log. Plain JS, no build step.
 // tools/update.ps1 rewrites APP_VERSION on every publish.
-const APP_VERSION = '2026.10.06-0020';
+const APP_VERSION = '2026.10.06-2211';
 const PSI_PER_BAR = 14.5038;
-const PARTS = [['fork', 'Fork'], ['shock', 'Shock']];
 
 const $app = document.getElementById('app');
 const $toast = document.getElementById('toast');
@@ -17,7 +16,8 @@ const num = (v) => {
   const n = parseFloat(String(v).replace(',', '.'));
   return Number.isFinite(n) ? n : null;
 };
-const trim = (n, dp) => (n == null ? '' : String(+Number(n).toFixed(dp)));
+const trim = (n, dp = 2) => (n == null ? '' : String(+Number(n).toFixed(dp)));
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 function fmtDate(ts) {
   const d = new Date(ts);
@@ -28,7 +28,6 @@ function fmtDate(ts) {
   if (d.getFullYear() !== now.getFullYear()) opts.year = 'numeric';
   return `${d.toLocaleDateString(undefined, opts)} ${time}`;
 }
-const toLocalInput = (ts) => new Date(ts - new Date(ts).getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 
 let toastTimer;
 function toast(msg) {
@@ -37,6 +36,39 @@ function toast(msg) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => $toast.classList.remove('show'), 2600);
 }
+const buzz = (ms) => { try { navigator.vibrate?.(ms); } catch { /* unsupported */ } };
+
+/* ---------- dial types ---------- */
+
+const TYPES = {
+  clicks: { label: 'Clicks', unit: 'clicks', step: 1, min: 0, max: 16 },
+  turns: { label: 'Turns', unit: 'turns', step: 0.25, min: 0, max: 4 },
+  psi: { label: 'Pressure (psi)', unit: 'psi', step: 1, min: 0, max: 300 },
+  bar: { label: 'Pressure (bar)', unit: 'bar', step: 0.1, min: 0, max: 20 },
+  spacers: { label: 'Spacers / tokens', unit: 'spacers', step: 1, min: 0, max: 6 },
+  custom: { label: 'Other', unit: '', step: 1, min: 0, max: 100 },
+};
+const PRESETS = [
+  ['Rebound', 'clicks'], ['LSC', 'clicks'], ['HSC', 'clicks'], ['LSR', 'clicks'], ['HSR', 'clicks'],
+  ['Air pressure', 'psi'], ['Volume spacers', 'spacers'], ['Preload', 'turns'],
+  ['Sag', 'custom', { unit: '%', min: 0, max: 50, value: 25 }],
+];
+
+function newDial(name, type, o = {}) {
+  const t = TYPES[type];
+  return {
+    id: uid(), name, type,
+    unit: o.unit ?? '',
+    min: o.min ?? t.min, max: o.max ?? t.max, step: o.step ?? t.step,
+    value: o.value ?? o.min ?? t.min,
+  };
+}
+const unitOf = (d) => (d.type === 'custom' ? d.unit || '' : TYPES[d.type].unit);
+const fmt = (d, v) => trim(v, 2);
+const stepCount = (d) => Math.max(1, Math.round((d.max - d.min) / d.step));
+// Finger rotation per step: a short dial spans about 270° of travel like a real
+// adjuster; long ranges (pressure) get a finer, fixed feel.
+const degPerStep = (d) => clamp(270 / stepCount(d), 8, 36);
 
 /* ---------- storage (IndexedDB, mirrored to localStorage) ---------- */
 
@@ -62,18 +94,58 @@ async function idb(mode, fn) {
 
 function defaultState() {
   return {
-    schema: 1,
-    settings: { pressureUnit: 'psi', sagUnit: '%', theme: 'auto', lastBikeId: null, lastBackup: null },
-    bikes: [],
+    schema: 2,
+    settings: { theme: 'auto', lastPage: null, lastBackup: null },
+    components: [],
     entries: [],
+    pending: {},
   };
 }
+
+// Version 1 stored bikes with a fork/shock each; turn those into profiles.
+function convertV1(old) {
+  const s = defaultState();
+  s.settings.theme = old.settings?.theme || 'auto';
+  s.settings.lastBackup = old.settings?.lastBackup || null;
+  const bar = old.settings?.pressureUnit === 'bar';
+  for (const bike of old.bikes || []) {
+    const bikeEntries = (old.entries || []).filter((e) => e.bikeId === bike.id).sort((a, b) => a.ts - b.ts);
+    for (const part of ['fork', 'shock']) {
+      const c = bike[part];
+      if (!c) continue;
+      const map = [];
+      if (c.spring === 'coil') map.push([newDial('Spring rate', 'custom', { unit: 'lb', step: 25, min: 200, max: 800, value: 400 }), (su) => su.springRate]);
+      else map.push([newDial('Air pressure', bar ? 'bar' : 'psi'), (su) => (su.pressure == null ? null : bar ? +(su.pressure / PSI_PER_BAR).toFixed(1) : su.pressure)]);
+      if (c.spring !== 'coil' && c.tokens) map.push([newDial('Volume spacers', 'spacers'), (su) => su.tokens]);
+      for (const a of c.adjusters || []) map.push([newDial(a.label, 'clicks', { max: a.max ?? 16 }), (su) => su.adj?.[a.id]]);
+      const comp = { id: uid(), name: c.name || (part === 'fork' ? 'Fork' : 'Shock'), kind: part, bike: bike.name || '', dials: map.map((m) => m[0]) };
+      let prev = null;
+      for (const e of bikeEntries) {
+        if (!e[part]) continue;
+        const snap = { ...prev };
+        map.forEach(([d, get]) => { const v = get(e[part]); if (v != null) snap[d.id] = v; });
+        const changes = prev ? comp.dials.filter((d) => snap[d.id] !== prev[d.id])
+          .map((d) => ({ dialId: d.id, name: d.name, unit: unitOf(d), from: prev[d.id] ?? null, to: snap[d.id] ?? null })) : [];
+        s.entries.push({ id: uid(), componentId: comp.id, ts: e.ts, start: !prev, changes, snapshot: snap, note: [e.location, e.notes].filter(Boolean).join(' — ') });
+        prev = snap;
+      }
+      for (const d of comp.dials) {
+        if (prev?.[d.id] != null) d.value = prev[d.id];
+        d.max = Math.max(d.max, d.value);
+      }
+      s.components.push(comp);
+    }
+  }
+  return s;
+}
+
 function migrate(s) {
+  if (!s.schema || s.schema < 2) s = convertV1(s);
   const d = defaultState();
   s.settings = { ...d.settings, ...s.settings };
-  s.bikes ||= [];
+  s.components ||= [];
   s.entries ||= [];
-  s.schema = 1;
+  s.pending ||= {};
   return s;
 }
 
@@ -84,74 +156,30 @@ async function load() {
   if (!s) { try { s = JSON.parse(localStorage.getItem(LS_KEY)); } catch { /* none */ } }
   state = migrate(s || defaultState());
 }
+let saveTimer;
 async function save() {
+  clearTimeout(saveTimer);
   const json = JSON.stringify(state);
   try { localStorage.setItem(LS_KEY, json); } catch { /* quota; IndexedDB is primary */ }
   try { await idb('readwrite', (st) => st.put(JSON.parse(json), KEY)); }
   catch (e) { toast('Save failed: ' + e.message); }
 }
+const saveSoon = () => { clearTimeout(saveTimer); saveTimer = setTimeout(save, 400); };
 
 /* ---------- domain ---------- */
 
-const bikeById = (id) => state.bikes.find((b) => b.id === id);
+const compById = (id) => state.components.find((c) => c.id === id);
 const entryById = (id) => state.entries.find((e) => e.id === id);
-const entriesFor = (bikeId) => state.entries.filter((e) => e.bikeId === bikeId).sort((a, b) => b.ts - a.ts);
-const latest = (bikeId) => entriesFor(bikeId)[0] || null;
-const previousOf = (entry) => entriesFor(entry.bikeId).find((e) => e.ts < entry.ts) || null;
-const pUnit = () => state.settings.pressureUnit;
-const sUnit = () => state.settings.sagUnit;
+const entriesFor = (cid) => state.entries.filter((e) => e.componentId === cid).sort((a, b) => b.ts - a.ts);
+const current = (comp, d) => state.pending[comp.id]?.[d.id] ?? d.value;
+const pendingCount = (comp) => comp.dials.filter((d) => current(comp, d) !== d.value).length;
+const KINDS = [['fork', 'Fork'], ['shock', 'Shock'], ['other', 'Other']];
+const kindLabel = (k) => KINDS.find(([v]) => v === k)?.[1] || 'Other';
 
-function adjuster(label) { return { id: uid(), label, max: null }; }
-function defaultComponent() {
-  return {
-    name: '', spring: 'air', travel: null, tokens: true, targetSag: null,
-    adjusters: [adjuster('Rebound'), adjuster('LSC'), adjuster('HSC')],
-  };
-}
-
-// The values shown for a component, in display order.
-function fields(comp) {
-  const f = [];
-  if (comp.spring === 'coil') f.push({ key: 'springRate', label: 'Spring', unit: 'lb', step: 25 });
-  else f.push({ key: 'pressure', label: 'Pressure', unit: pUnit(), step: pUnit() === 'bar' ? 0.1 : 1 });
-  if (comp.spring !== 'coil' && comp.tokens) f.push({ key: 'tokens', label: 'Spacers', unit: '', step: 1 });
-  for (const a of comp.adjusters) f.push({ key: 'adj:' + a.id, label: a.label, unit: 'clicks', max: num(a.max), step: 1 });
-  f.push({ key: 'sag', label: 'Sag', unit: sUnit() === '%' ? '%' : 'mm', step: 1 });
-  return f;
-}
-
-// Sag is stored as {v, u} in whatever unit it was entered; show it in the
-// preferred unit when travel/stroke allows the conversion.
-function sagText(sag, comp) {
-  if (!sag || sag.v == null) return '';
-  const want = sUnit();
-  if (sag.u === want) return trim(sag.v, 1);
-  if (comp?.travel) return trim(want === '%' ? (sag.v / comp.travel) * 100 : (sag.v * comp.travel) / 100, 1);
-  return `${trim(sag.v, 1)} ${sag.u}`;
-}
-
-// A setup value as a display string in the current units ('' when unset).
-function display(setup, key, comp) {
-  if (!setup) return '';
-  if (key === 'pressure') return setup.pressure == null ? '' : pUnit() === 'bar' ? trim(setup.pressure / PSI_PER_BAR, 2) : trim(setup.pressure, 1);
-  if (key === 'sag') return sagText(setup.sag, comp);
-  if (key.startsWith('adj:')) { const v = setup.adj?.[key.slice(4)]; return v == null ? '' : trim(v, 2); }
-  return setup[key] == null ? '' : trim(setup[key], 2);
-}
-const unitFor = (f, text) => (f.unit === 'clicks' || /[a-z%]$/i.test(text) ? '' : f.unit);
-
-function diffLines(prev, cur, bike) {
-  const out = [];
-  for (const [part, name] of PARTS) {
-    const comp = bike[part];
-    if (!comp) continue;
-    for (const f of fields(comp)) {
-      const a = display(prev?.[part], f.key, comp);
-      const b = display(cur?.[part], f.key, comp);
-      if (a !== b) out.push({ part: name, key: f.key, label: f.label, from: a || '–', to: b || '–', unit: unitFor(f, b) });
-    }
-  }
-  return out;
+function setPending(comp, d, v) {
+  const p = (state.pending[comp.id] ||= {});
+  if (v === d.value) delete p[d.id]; else p[d.id] = v;
+  if (!Object.keys(p).length) delete state.pending[comp.id];
 }
 
 /* ---------- icons ---------- */
@@ -163,11 +191,14 @@ const ICON = {
   plus: svg('<path d="M12 5v14M5 12h14"/>'),
   edit: svg('<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>'),
   chevron: svg('<path d="M9 18l6-6-6-6"/>'),
+  up: svg('<path d="M18 15l-6-6-6 6"/>'),
+  down: svg('<path d="M6 9l6 6 6-6"/>'),
 };
 
 const header = (title, left = '', right = '<span class="icon-btn"></span>') =>
   `<header class="top">${left || '<span class="icon-btn"></span>'}<h1>${title}</h1>${right}</header>`;
 const backBtn = (href = '#/') => `<a class="icon-btn" href="${href}" aria-label="Back">${ICON.back}</a>`;
+const gearBtn = `<a class="icon-btn" href="#/settings" aria-label="Settings">${ICON.gear}</a>`;
 const seg = (action, key, value, options) => `<div class="seg">${options.map(([v, label]) =>
   `<button type="button" class="${v === value ? 'on' : ''}" data-action="${action}" data-key="${key}" data-value="${v}">${label}</button>`).join('')}</div>`;
 
@@ -176,34 +207,31 @@ const seg = (action, key, value, options) => `<div class="seg">${options.map(([v
 let installPrompt = null;
 const isInstalled = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 const isPhone = () => /Android|iPhone|iPad/i.test(navigator.userAgent);
-const installHidden = () => { try { return localStorage.getItem('sagbook-hide-install') === '1'; } catch { return false; } };
 
 // Explains how to install from whichever browser the page was opened in.
 function installSteps() {
   const ua = navigator.userAgent;
   if (/iPhone|iPad/i.test(ua)) return 'In Safari, tap <b>Share</b> → <b>Add to Home Screen</b>.';
   if (/; wv\)|FBAN|FBAV|Instagram|GSA\//i.test(ua)) {
-    return 'This page is open inside another app, which can\'t install apps. Tap <b>⋮</b> → <b>Open in Chrome</b>, then come back to this card.';
+    return 'This page is open inside another app, which can\'t install apps. Tap <b>⋮</b> → <b>Open in Chrome</b>, then come back here.';
   }
   if (/SamsungBrowser/i.test(ua)) {
-    return 'Open this page in <b>Chrome</b> instead of Samsung Internet (copy the address into Chrome). Chrome installs SagBook as a proper app, which is needed for quick launch.';
+    return 'Open this page in <b>Chrome</b> instead of Samsung Internet. Chrome installs SagBook as a proper app, which quick launch needs.';
   }
   if (/Android/i.test(ua)) return 'Tap <b>⋮</b> (top right of Chrome) → <b>Add to Home screen</b> → <b>Install</b>.';
   return 'Click the <b>install icon</b> at the right end of the address bar in Chrome or Edge.';
 }
 
-function installCard(compact) {
+function installCard() {
   if (isInstalled()) return '';
-  if (compact && installHidden()) return '';
   return `<section class="card install">
     <div class="install-head"><img src="icons/icon-192.png" alt="" width="44" height="44">
       <div><h3>Install SagBook</h3><p class="muted">Home-screen icon, opens instantly, works offline.</p></div>
-      ${compact ? '<button type="button" class="icon-btn subtle" data-action="hide-install" aria-label="Hide">✕</button>' : ''}
     </div>
     ${installPrompt
       ? '<button type="button" class="btn primary block" data-action="install">Install app</button>'
       : `<p class="steps">${installSteps()}</p>`}
-    ${!isPhone() && !compact ? `<div class="qr"><img src="icons/qr.svg" alt="QR code for the SagBook link" width="160" height="160">
+    ${!isPhone() ? `<div class="qr"><img src="icons/qr.svg" alt="QR code for the SagBook link" width="160" height="160">
       <p class="muted">Scan with your phone's camera to open SagBook there.</p></div>` : ''}
   </section>`;
 }
@@ -211,318 +239,342 @@ function installCard(compact) {
 window.addEventListener('beforeinstallprompt', (e) => {
   e.preventDefault();
   installPrompt = e;
-  if (!dirty && state) rerenderKeepScroll();
+  if (state && !location.hash.startsWith('#/component')) rerenderKeepScroll();
 });
 window.addEventListener('appinstalled', () => {
   installPrompt = null;
   toast('SagBook installed — open it from your home screen');
-  if (!dirty && state) rerenderKeepScroll();
 });
 
-/* ---------- view: home ---------- */
+/* ---------- view: dials (main) ---------- */
 
-function viewHome() {
-  if (!state.bikes.length) {
-    return `${header('SagBook', '', `<a class="icon-btn" href="#/settings" aria-label="Settings">${ICON.gear}</a>`)}
-    ${installCard(true)}
+const GAUGE = 'M18.89 81.11 A44 44 0 1 1 81.11 81.11'; // 270° arc, gap at the bottom
+
+function viewMain() {
+  if (!state.components.length) {
+    return `${header('SagBook', '', gearBtn)}
+    ${installCard()}
     <main class="empty">
-      <h2>No bikes yet</h2>
-      <p class="muted">Add a bike with its fork and shock, then log every setup change.</p>
-      <a class="btn primary big" href="#/bike/new">Add a bike</a>
+      <h2>Set up your suspension</h2>
+      <p class="muted">Add your fork and shock, tell SagBook which dials they have and where they're set. Then just spin the dials as you change them.</p>
+      <a class="btn primary big" href="#/component/new?kind=fork">Add fork</a>
+      <a class="btn big" href="#/component/new?kind=shock">Add shock</a>
     </main>`;
   }
-  const bike = bikeById(state.settings.lastBikeId) || state.bikes[0];
-  const list = entriesFor(bike.id);
-  const cur = list[0];
-  const backupDue = list.length && (!state.settings.lastBackup || Date.now() - state.settings.lastBackup > 30 * 864e5);
-  const chips = state.bikes.length > 1
-    ? `<nav class="chips">${state.bikes.map((b) => `<button class="chip ${b.id === bike.id ? 'on' : ''}" data-action="pick-bike" data-id="${b.id}">${esc(b.name)}</button>`).join('')}</nav>`
-    : '';
-  return `${header('SagBook', '', `<a class="icon-btn" href="#/settings" aria-label="Settings">${ICON.gear}</a>`)}
-  ${chips}
-  <main>
-    ${installCard(true)}
-    <div class="bike-title"><h2>${esc(bike.name)}</h2><a class="link" href="#/bike/${bike.id}">${ICON.edit} Edit</a></div>
-    ${PARTS.map(([part, label]) => (bike[part] ? setupCard(bike, part, label, cur?.[part]) : '')).join('')}
-    ${!bike.fork && !bike.shock ? `<p class="muted pad">No fork or shock set up yet. <a class="link" href="#/bike/${bike.id}">Edit bike</a></p>` : ''}
-    <h2 class="section">History</h2>
-    ${list.length
-      ? `<ul class="history">${list.map((e, i) => historyItem(e, list[i + 1], bike)).join('')}</ul>`
-      : '<p class="muted pad">Nothing logged yet. Tap <b>Log change</b> to record your current setup.</p>'}
-    ${backupDue ? '<a class="banner" href="#/settings">Back up your data — it only lives on this phone. Tap to back up.</a>' : ''}
-  </main>
-  <div class="dock"><a class="btn primary big block" href="#/log/${bike.id}">${ICON.plus} Log change</a></div>`;
+  return `${header('SagBook', '', gearBtn)}
+  <nav class="tabs" id="tabs">${state.components.map((c, i) =>
+    `<button type="button" class="tab" data-action="goto-page" data-index="${i}">${esc(c.name)}${pendingCount(c) ? '<i class="dot"></i>' : ''}</button>`).join('')}</nav>
+  <div class="pager" id="pager">${state.components.map(pageHtml).join('')}</div>`;
 }
 
-function setupCard(bike, part, label, setup, changedKeys) {
-  const comp = bike[part];
-  const cells = fields(comp).map((f) => {
-    const v = display(setup, f.key, comp);
-    const unit = v ? unitFor(f, v) : '';
-    let sub = '';
-    if (f.max != null) sub = `of ${trim(f.max, 2)}`;
-    if (f.key === 'sag' && comp.targetSag?.v != null) {
-      const t = sagText(comp.targetSag, comp);
-      sub = `target ${t}${unitFor(f, t) === '%' ? '%' : unitFor(f, t) ? ` ${unitFor(f, t)}` : ''}`;
-    }
-    return `<div class="cell ${changedKeys?.has(f.key) ? 'changed' : ''}">
-      <span class="k">${esc(f.label)}</span>
-      <span class="v">${v ? esc(v) : '–'}${unit ? `<small>${esc(unit)}</small>` : ''}</span>
-      ${sub ? `<span class="s">${esc(sub)}</span>` : ''}
-    </div>`;
-  }).join('');
-  return `<section class="card">
-    <div class="card-head"><h3>${label}</h3><span class="muted">${esc(comp.name)}</span></div>
-    <div class="grid">${cells}</div>
+function pageHtml(comp) {
+  const list = entriesFor(comp.id);
+  return `<section class="page" data-comp="${comp.id}">
+    <div class="page-head">
+      <div><h2>${esc(comp.name)}</h2><span class="muted">${esc([kindLabel(comp.kind), comp.bike].filter(Boolean).join(' · '))}</span></div>
+      <a class="link" href="#/component/${comp.id}">${ICON.edit} Setup</a>
+    </div>
+    ${comp.dials.length
+      ? `<div class="dials">${comp.dials.map((d) => dialCard(comp, d)).join('')}</div>`
+      : `<p class="muted pad">No dials yet. <a class="link" href="#/component/${comp.id}">Add dials</a></p>`}
+    <h3 class="section">History</h3>
+    ${list.length ? `<ul class="history">${list.map(historyItem).join('')}</ul>` : '<p class="muted pad">Changes you save appear here.</p>'}
+    ${saveBar(comp)}
   </section>`;
 }
 
-function historyItem(e, prev, bike) {
-  const d = diffLines(prev, e, bike);
-  const body = !prev
-    ? '<span class="muted">Starting setup</span>'
-    : d.length
-      ? d.map((x) => `<span class="chg"><i>${x.part}</i>${esc(x.label)} ${esc(x.from)} → <b>${esc(x.to)}</b>${x.unit ? ` ${esc(x.unit)}` : ''}</span>`).join('')
-      : '<span class="muted">No setting changes</span>';
-  const note = [e.location, e.notes].filter(Boolean).join(' — ');
-  return `<li><a class="hist" href="#/entry/${e.id}">
-    <div class="hist-top"><time>${fmtDate(e.ts)}</time>
-      ${e.baseline ? '<span class="badge">Baseline</span>' : ''}
-      ${e.rating ? `<span class="stars">${'★'.repeat(e.rating)}</span>` : ''}
+function dialState(comp, d) {
+  const v = current(comp, d);
+  const pct = (clamp(v, d.min, d.max) - d.min) / ((d.max - d.min) || 1);
+  return { v, pct, changed: v !== d.value };
+}
+
+function dialCard(comp, d) {
+  const { v, pct, changed } = dialState(comp, d);
+  return `<div class="dial ${changed ? 'changed' : ''}" data-dial="${comp.id}|${d.id}">
+    <div class="dial-name">${esc(d.name)}</div>
+    <button type="button" class="dial-value" data-action="type-value" aria-label="Type a value for ${esc(d.name)}"><b>${fmt(d, v)}</b><small>${esc(unitOf(d))}</small></button>
+    <div class="dial-was">${changed ? `was ${fmt(d, d.value)}` : `${fmt(d, d.min)}–${fmt(d, d.max)}`}</div>
+    <div class="knob-wrap">
+      <svg class="gauge" viewBox="0 0 100 100" aria-hidden="true">
+        <path d="${GAUGE}" pathLength="100" class="track"/>
+        <path d="${GAUGE}" pathLength="100" class="fill" stroke-dasharray="${(pct * 100).toFixed(2)} 100"/>
+      </svg>
+      <div class="knob" role="slider" tabindex="0" aria-label="${esc(d.name)}" aria-valuemin="${d.min}" aria-valuemax="${d.max}" aria-valuenow="${v}"
+        style="--rot:${(-135 + pct * 270).toFixed(1)}deg"><span class="pointer"></span></div>
     </div>
-    <div class="chgs">${body}</div>
-    ${note ? `<div class="note">${esc(note)}</div>` : ''}
-  </a></li>`;
-}
-
-/* ---------- view: log / edit entry ---------- */
-
-let form = null;
-let dirty = false;
-
-function startForm(bikeId, { editId, fromId } = {}) {
-  const bike = bikeById(bikeId);
-  if (!bike) return false;
-  const editing = editId ? entryById(editId) : null;
-  const restoring = fromId ? entryById(fromId) : null;
-  const src = editing || restoring || latest(bikeId);
-  const ref = editing ? previousOf(editing) : latest(bikeId);
-  form = {
-    bikeId, editId, fromId, src,
-    vals: {}, init: {}, refVals: {},
-    location: editing?.location || '',
-    notes: editing?.notes || '',
-    rating: editing?.rating || 0,
-    baseline: editing?.baseline || false,
-    ts: editing?.ts || Date.now(),
-  };
-  form.when = form.whenInit = toLocalInput(form.ts);
-  for (const [part] of PARTS) {
-    const comp = bike[part];
-    if (!comp) continue;
-    form.vals[part] = {}; form.init[part] = {}; form.refVals[part] = {};
-    for (const f of fields(comp)) {
-      form.vals[part][f.key] = form.init[part][f.key] = display(src?.[part], f.key, comp);
-      form.refVals[part][f.key] = display(ref?.[part], f.key, comp);
-    }
-  }
-  dirty = !!restoring;
-  return true;
-}
-
-function viewLog() {
-  const bike = bikeById(form.bikeId);
-  const restoring = form.fromId ? entryById(form.fromId) : null;
-  const stars = [1, 2, 3, 4, 5].map((n) =>
-    `<button type="button" class="star ${n <= form.rating ? 'on' : ''}" data-action="rate" data-value="${n}" aria-label="${n} stars">★</button>`).join('');
-  return `${header(form.editId ? 'Edit entry' : 'Log change', backBtn(form.editId ? `#/entry/${form.editId}` : '#/'))}
-  <div class="sub">${esc(bike.name)}${restoring ? ` · restoring ${esc(fmtDate(restoring.ts))}` : ''}</div>
-  <main class="form">
-    ${PARTS.map(([part, label]) => (bike[part] ? `<section class="card">
-      <div class="card-head"><h3>${label}</h3><span class="muted">${esc(bike[part].name)}</span></div>
-      ${fields(bike[part]).map((f) => stepperRow(part, f)).join('')}
-    </section>` : '')).join('')}
-    <section class="card">
-      <label class="field"><span>Trail / location</span>
-        <input data-meta="location" value="${esc(form.location)}" placeholder="e.g. Local black run" autocomplete="off"></label>
-      <div class="field"><span>How did it feel?</span><div class="rating">${stars}</div></div>
-      <label class="field"><span>Notes</span>
-        <textarea data-meta="notes" rows="3" placeholder="e.g. Bottoming on drops, harsh over roots…">${esc(form.notes)}</textarea></label>
-      <label class="check"><input type="checkbox" data-meta="baseline" ${form.baseline ? 'checked' : ''}> Mark as baseline (known-good setup)</label>
-      <label class="field"><span>Date &amp; time</span>
-        <input type="datetime-local" data-meta="when" value="${form.when}"></label>
-    </section>
-    ${form.editId ? '<button type="button" class="btn danger block" data-action="delete-entry">Delete entry</button>' : ''}
-  </main>
-  <div class="dock"><button type="button" class="btn primary big block" data-action="save-entry">Save</button></div>`;
-}
-
-function rowHint(part, f) {
-  const v = form.vals[part][f.key];
-  const was = form.refVals[part][f.key];
-  if (v !== was) return { changed: true, text: `was ${was || '–'}` };
-  return { changed: false, text: f.max != null ? `0–${trim(f.max, 2)}` : f.unit === 'clicks' ? 'clicks' : f.unit };
-}
-
-function stepperRow(part, f) {
-  const hint = rowHint(part, f);
-  return `<div class="row ${hint.changed ? 'changed' : ''}" data-row="${part}|${f.key}">
-    <div class="row-label"><span>${esc(f.label)}</span><small>${esc(hint.text)}</small></div>
-    <div class="stepper">
-      <button type="button" class="step" data-action="step" data-dir="-1" aria-label="Decrease ${esc(f.label)}">−</button>
-      <input inputmode="decimal" autocomplete="off" data-field="${part}|${f.key}" value="${esc(form.vals[part][f.key])}" placeholder="–" aria-label="${esc(f.label)}">
-      <button type="button" class="step" data-action="step" data-dir="1" aria-label="Increase ${esc(f.label)}">+</button>
+    <div class="dial-steps">
+      <button type="button" data-action="nudge" data-dir="-1" aria-label="Decrease ${esc(d.name)}">−</button>
+      <button type="button" data-action="nudge" data-dir="1" aria-label="Increase ${esc(d.name)}">+</button>
     </div>
   </div>`;
 }
 
-function fieldDef(part, key) {
-  return fields(bikeById(form.bikeId)[part]).find((f) => f.key === key);
+function saveBar(comp) {
+  const n = pendingCount(comp);
+  return `<div class="savebar ${n ? 'show' : ''}" data-savebar="${comp.id}">
+    <input class="note-input" data-note="${comp.id}" placeholder="Note (optional) — e.g. harsh on roots" autocomplete="off">
+    <div class="savebar-row">
+      <span class="count">${n} change${n === 1 ? '' : 's'}</span>
+      <button type="button" class="btn" data-action="undo" data-id="${comp.id}">Undo</button>
+      <button type="button" class="btn primary" data-action="save-changes" data-id="${comp.id}">Save</button>
+    </div>
+  </div>`;
 }
 
-function refreshRow(part, key) {
-  const row = $app.querySelector(`[data-row="${part}|${key}"]`);
-  if (!row) return;
-  const hint = rowHint(part, fieldDef(part, key));
-  row.classList.toggle('changed', hint.changed);
-  row.querySelector('small').textContent = hint.text;
+function historyItem(e) {
+  const comp = compById(e.componentId);
+  const body = e.start
+    ? '<span class="muted">Starting setup</span>'
+    : e.changes.length
+      ? e.changes.map((c) => {
+        const name = comp?.dials.find((d) => d.id === c.dialId)?.name || c.name;
+        return `<span class="chg">${esc(name)} ${esc(trim(c.from) || '–')} → <b>${esc(trim(c.to) || '–')}</b>${c.unit ? ` <small>${esc(c.unit)}</small>` : ''}</span>`;
+      }).join('')
+      : '<span class="muted">No dial changes</span>';
+  return `<li><a class="hist" href="#/entry/${e.id}">
+    <time>${fmtDate(e.ts)}</time>
+    <div class="chgs">${body}</div>
+    ${e.note ? `<div class="note">${esc(e.note)}</div>` : ''}
+  </a></li>`;
 }
 
-function stepField(part, key, dir) {
-  const f = fieldDef(part, key);
-  let n = (num(form.vals[part][key]) ?? 0) + dir * f.step;
-  n = Math.max(0, n);
-  if (f.max != null) n = Math.min(f.max, n);
-  form.vals[part][key] = trim(n, 2);
-  $app.querySelector(`[data-field="${part}|${key}"]`).value = form.vals[part][key];
-  dirty = true;
-  refreshRow(part, key);
+// Update one dial in place (re-rendering would break an active drag).
+function refreshDial(comp, d) {
+  const card = $app.querySelector(`[data-dial="${comp.id}|${d.id}"]`);
+  if (!card) return;
+  const { v, pct, changed } = dialState(comp, d);
+  card.classList.toggle('changed', changed);
+  card.querySelector('.dial-value b').textContent = fmt(d, v);
+  card.querySelector('.dial-was').textContent = changed ? `was ${fmt(d, d.value)}` : `${fmt(d, d.min)}–${fmt(d, d.max)}`;
+  card.querySelector('.fill').setAttribute('stroke-dasharray', `${(pct * 100).toFixed(2)} 100`);
+  const knob = card.querySelector('.knob');
+  knob.style.setProperty('--rot', `${(-135 + pct * 270).toFixed(1)}deg`);
+  knob.setAttribute('aria-valuenow', v);
+  refreshSaveBar(comp);
 }
 
-// Fields left untouched copy the source value exactly, so unit conversions
-// never drift a stored number.
-function formToSetup(part, comp) {
-  const vals = form.vals[part], init = form.init[part], src = form.src?.[part] || null;
-  const keep = (k) => src && vals[k] === init[k];
-  const s = { adj: {} };
-  for (const { key } of fields(comp)) {
-    if (key.startsWith('adj:')) {
-      const id = key.slice(4);
-      s.adj[id] = keep(key) ? src.adj?.[id] ?? null : num(vals[key]);
-    } else if (key === 'pressure') {
-      const n = num(vals[key]);
-      s.pressure = keep(key) ? src.pressure ?? null : n == null ? null : pUnit() === 'bar' ? n * PSI_PER_BAR : n;
-    } else if (key === 'sag') {
-      const n = num(vals[key]);
-      s.sag = keep(key) ? src.sag ?? null : n == null ? null : { v: n, u: sUnit() };
-    } else {
-      s[key] = keep(key) ? src[key] ?? null : num(vals[key]);
-    }
+function refreshSaveBar(comp) {
+  const bar = $app.querySelector(`[data-savebar="${comp.id}"]`);
+  const n = pendingCount(comp);
+  if (bar) {
+    bar.classList.toggle('show', n > 0);
+    bar.querySelector('.count').textContent = `${n} change${n === 1 ? '' : 's'}`;
   }
-  return s;
+  const i = state.components.indexOf(comp);
+  const tab = $app.querySelectorAll('.tab')[i];
+  if (tab) {
+    const dot = tab.querySelector('.dot');
+    if (n && !dot) tab.insertAdjacentHTML('beforeend', '<i class="dot"></i>');
+    if (!n && dot) dot.remove();
+  }
 }
 
-async function saveEntry() {
-  const bike = bikeById(form.bikeId);
-  const existing = form.editId ? entryById(form.editId) : null;
-  const entry = existing || { id: uid(), bikeId: bike.id };
-  for (const [part] of PARTS) entry[part] = bike[part] ? formToSetup(part, bike[part]) : null;
-  // The picker only has minute precision, so keep the exact time unless it was changed.
-  entry.ts = form.when === form.whenInit ? (existing ? form.ts : Date.now()) : new Date(form.when).getTime() || Date.now();
-  entry.location = form.location.trim();
-  entry.notes = form.notes.trim();
-  entry.rating = form.rating || 0;
-  entry.baseline = form.baseline;
-  if (!existing) state.entries.push(entry);
-  state.settings.lastBikeId = bike.id;
+function stepDial(comp, d, dir) {
+  const v = current(comp, d);
+  const nv = +clamp(v + dir * d.step, d.min, d.max).toFixed(4);
+  if (nv === v) { buzz(30); return false; }
+  setPending(comp, d, nv);
+  buzz(6);
+  refreshDial(comp, d);
+  saveSoon();
+  return true;
+}
+
+async function saveChanges(comp) {
+  const changed = comp.dials.filter((d) => current(comp, d) !== d.value);
+  if (!changed.length) return;
+  const changes = changed.map((d) => ({ dialId: d.id, name: d.name, unit: unitOf(d), from: d.value, to: current(comp, d) }));
+  for (const d of changed) d.value = current(comp, d);
+  delete state.pending[comp.id];
+  const note = $app.querySelector(`[data-note="${comp.id}"]`)?.value.trim() || '';
+  state.entries.push({
+    id: uid(), componentId: comp.id, ts: Date.now(), changes, note,
+    snapshot: Object.fromEntries(comp.dials.map((d) => [d.id, d.value])),
+  });
   await save();
-  dirty = false;
+  buzz(20);
   toast('Saved');
-  if (pendingReload) { location.replace('#/'); location.reload(); return; }
-  location.hash = existing ? `#/entry/${entry.id}` : '#/';
+  rerenderKeepScroll();
 }
 
-/* ---------- view: entry detail ---------- */
+/* ---------- pager ---------- */
+
+function pageIndex() {
+  const i = state.components.findIndex((c) => c.id === state.settings.lastPage);
+  return i < 0 ? 0 : i;
+}
+
+function setupPager() {
+  const pager = document.getElementById('pager');
+  if (!pager) return;
+  pager.scrollLeft = pageIndex() * pager.clientWidth;
+  markTab(pageIndex());
+  let t;
+  pager.addEventListener('scroll', () => {
+    const i = Math.round(pager.scrollLeft / pager.clientWidth);
+    markTab(i);
+    clearTimeout(t);
+    t = setTimeout(() => {
+      const id = state.components[i]?.id;
+      if (id && id !== state.settings.lastPage) { state.settings.lastPage = id; saveSoon(); }
+    }, 150);
+  }, { passive: true });
+}
+
+function markTab(i) {
+  const tabs = document.querySelectorAll('.tab');
+  tabs.forEach((t, j) => t.classList.toggle('on', i === j));
+  tabs[i]?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+
+/* ---------- knob dragging ---------- */
+
+let drag = null;
+const angleOf = (e) => Math.atan2(e.clientY - drag.cy, e.clientX - drag.cx) * 180 / Math.PI;
+
+document.addEventListener('pointerdown', (e) => {
+  const knob = e.target.closest('.knob');
+  if (!knob) return;
+  const [cid, did] = knob.closest('.dial').dataset.dial.split('|');
+  const comp = compById(cid);
+  const r = knob.getBoundingClientRect();
+  drag = { comp, d: comp.dials.find((x) => x.id === did), cx: r.left + r.width / 2, cy: r.top + r.height / 2, acc: 0, id: e.pointerId, knob };
+  drag.last = angleOf(e);
+  try { knob.setPointerCapture(e.pointerId); } catch { /* pointer already gone */ }
+  knob.classList.add('active');
+  e.preventDefault();
+});
+
+document.addEventListener('pointermove', (e) => {
+  if (!drag || e.pointerId !== drag.id) return;
+  if (Math.hypot(e.clientX - drag.cx, e.clientY - drag.cy) < 10) return; // too close to the centre to read an angle
+  const a = angleOf(e);
+  let delta = a - drag.last;
+  if (delta > 180) delta -= 360;
+  if (delta < -180) delta += 360;
+  drag.last = a;
+  drag.acc += delta;
+  const per = degPerStep(drag.d);
+  while (Math.abs(drag.acc) >= per) {
+    const dir = Math.sign(drag.acc);
+    drag.acc -= dir * per;
+    if (!stepDial(drag.comp, drag.d, dir)) { drag.acc = 0; break; }
+  }
+});
+
+function endDrag(e) {
+  if (!drag || e.pointerId !== drag.id) return;
+  drag.knob.classList.remove('active');
+  drag = null;
+  save();
+}
+document.addEventListener('pointerup', endDrag);
+document.addEventListener('pointercancel', endDrag);
+
+document.addEventListener('keydown', (e) => {
+  const knob = e.target.closest?.('.knob');
+  if (!knob) return;
+  const dir = { ArrowUp: 1, ArrowRight: 1, ArrowDown: -1, ArrowLeft: -1 }[e.key];
+  if (!dir) return;
+  const [cid, did] = knob.closest('.dial').dataset.dial.split('|');
+  const comp = compById(cid);
+  stepDial(comp, comp.dials.find((x) => x.id === did), dir);
+  e.preventDefault();
+});
+
+/* ---------- view: entry ---------- */
 
 function viewEntry(id) {
   const e = entryById(id);
   if (!e) return viewMissing();
-  const bike = bikeById(e.bikeId);
-  const prev = previousOf(e);
-  const d = diffLines(prev, e, bike);
-  const changed = (part) => new Set(prev ? d.filter((x) => x.part.toLowerCase() === part).map((x) => x.key) : []);
-  return `${header(fmtDate(e.ts), backBtn(), `<a class="icon-btn" href="#/edit/${e.id}" aria-label="Edit">${ICON.edit}</a>`)}
-  <div class="sub">${esc(bike.name)}${e.baseline ? ' · <span class="badge">Baseline</span>' : ''}${e.rating ? ` · <span class="stars">${'★'.repeat(e.rating)}</span>` : ''}</div>
+  const comp = compById(e.componentId);
+  const name = (dialId, fallback) => comp?.dials.find((d) => d.id === dialId)?.name || fallback;
+  const changedIds = new Set(e.changes.map((c) => c.dialId));
+  return `${header(fmtDate(e.ts), backBtn())}
+  <div class="sub">${esc(comp?.name || 'Deleted profile')}</div>
   <main>
-    ${e.location || e.notes ? `<section class="card notes">${e.location ? `<p><b>${esc(e.location)}</b></p>` : ''}${e.notes ? `<p>${esc(e.notes)}</p>` : ''}</section>` : ''}
-    ${prev ? `<p class="muted pad">${d.length ? `${d.length} change${d.length > 1 ? 's' : ''} from ${esc(fmtDate(prev.ts))} (highlighted)` : 'No setting changes from the previous entry'}</p>` : '<p class="muted pad">Starting setup</p>'}
-    ${PARTS.map(([part, label]) => (bike[part] ? setupCard(bike, part, label, e[part], changed(part)) : '')).join('')}
-    <div class="actions">
-      <a class="btn block" href="#/log/${bike.id}?from=${e.id}">Restore this setup</a>
-      <button type="button" class="btn block" data-action="toggle-baseline" data-id="${e.id}">${e.baseline ? 'Remove baseline mark' : 'Mark as baseline'}</button>
-    </div>
+    <section class="card">
+      <h3>${e.start ? 'Starting setup' : 'Changes'}</h3>
+      ${e.start ? '<p class="muted">How everything was set when this profile was created.</p>'
+        : e.changes.map((c) => `<p class="chg big">${esc(name(c.dialId, c.name))} ${esc(trim(c.from) || '–')} → <b>${esc(trim(c.to) || '–')}</b> <small>${esc(c.unit)}</small></p>`).join('') || '<p class="muted">No dial changes</p>'}
+    </section>
+    ${comp ? `<section class="card">
+      <h3>All dials after this change</h3>
+      <div class="snap">${comp.dials.filter((d) => e.snapshot?.[d.id] != null).map((d) =>
+        `<div class="${changedIds.has(d.id) ? 'changed' : ''}"><span>${esc(d.name)}</span><b>${fmt(d, e.snapshot[d.id])} <small>${esc(unitOf(d))}</small></b></div>`).join('')}</div>
+    </section>` : ''}
+    <section class="card">
+      <label class="field"><span>Note</span>
+        <textarea data-entry-note="${e.id}" rows="3" placeholder="How did it feel? Where were you riding?">${esc(e.note)}</textarea></label>
+    </section>
+    ${comp ? `<button type="button" class="btn block" data-action="restore" data-id="${e.id}">Set dials back to this</button>` : ''}
+    <button type="button" class="btn danger block" data-action="delete-entry" data-id="${e.id}">Delete entry</button>
   </main>`;
 }
 
-/* ---------- view: bike editor ---------- */
+/* ---------- view: profile setup ---------- */
 
 let draft = null;
-const PRESETS = ['Rebound', 'LSR', 'HSR', 'LSC', 'HSC', 'Lockout', 'Preload'];
+let dirty = false;
 
-function startDraft(id) {
+function startDraft(id, params) {
   if (id === 'new') {
-    draft = { id: uid(), name: '', fork: defaultComponent(), shock: defaultComponent(), _new: true, _stash: {} };
+    const kind = params.get('kind') || 'fork';
+    draft = { id: uid(), name: '', kind, bike: '', dials: [], _new: true };
     return true;
   }
-  const bike = bikeById(id);
-  if (!bike) return false;
-  draft = { ...structuredClone(bike), _stash: {} };
+  const comp = compById(id);
+  if (!comp) return false;
+  draft = structuredClone(comp);
   return true;
 }
 
-function viewBike() {
-  const parts = PARTS.map(([part, label]) => {
-    const c = draft[part];
-    const p = part;
-    const body = !c ? '' : `
-      <label class="field"><span>Make &amp; model</span>
-        <input data-bind="${p}.name" value="${esc(c.name)}" placeholder="${part === 'fork' ? 'e.g. RockShox Lyrik Ultimate' : 'e.g. Fox Float X2'}" autocomplete="off"></label>
-      <div class="field"><span>Spring</span>${seg('draft-set', `${p}.spring`, c.spring, [['air', 'Air'], ['coil', 'Coil']])}</div>
-      <div class="two">
-        <label class="field"><span>${part === 'fork' ? 'Travel' : 'Stroke'} (mm)</span>
-          <input inputmode="decimal" data-bind="${p}.travel" data-type="num" value="${esc(c.travel ?? '')}" placeholder="${part === 'fork' ? '160' : '62.5'}"></label>
-        <label class="field"><span>Target sag (${sUnit()})</span>
-          <input inputmode="decimal" data-bind="${p}.targetSag" data-type="sag" value="${esc(sagText(c.targetSag, c))}" placeholder="${sUnit() === '%' ? (part === 'fork' ? '20' : '30') : ''}"></label>
-      </div>
-      ${c.spring === 'air' ? `<label class="check"><input type="checkbox" data-bind="${p}.tokens" data-type="bool" ${c.tokens ? 'checked' : ''}> Track volume spacers / tokens</label>` : ''}
-      <div class="field"><span>Adjusters <em class="muted">(clicks counted from fully closed)</em></span>
-        ${c.adjusters.map((a, i) => `<div class="adj">
-          <input data-bind="${p}.adjusters.${i}.label" value="${esc(a.label)}" placeholder="Name" autocomplete="off">
-          <input inputmode="numeric" data-bind="${p}.adjusters.${i}.max" data-type="num" value="${esc(a.max ?? '')}" placeholder="Max">
-          <button type="button" class="icon-btn subtle" data-action="del-adj" data-part="${p}" data-index="${i}" aria-label="Remove ${esc(a.label)}">✕</button>
-        </div>`).join('')}
-        <div class="chips wrap">
-          ${PRESETS.filter((n) => !c.adjusters.some((a) => a.label === n)).map((n) =>
-            `<button type="button" class="chip" data-action="add-adj" data-part="${p}" data-label="${n}">+ ${n}</button>`).join('')}
-          <button type="button" class="chip" data-action="add-adj" data-part="${p}" data-label="">+ Custom</button>
-        </div>
-      </div>`;
-    return `<section class="card">
-      <label class="card-head toggle"><h3>${label}</h3>
-        <input type="checkbox" class="switch" data-action="toggle-part" data-part="${p}" ${c ? 'checked' : ''} aria-label="Has ${label.toLowerCase()}"></label>
-      ${body}
-    </section>`;
-  }).join('');
-  return `${header(draft._new ? 'New bike' : 'Edit bike', backBtn(draft._new ? '#/settings' : '#/'))}
+function viewComponent() {
+  const used = new Set(draft.dials.map((d) => d.name));
+  return `${header(draft._new ? `New ${kindLabel(draft.kind).toLowerCase()}` : 'Setup', backBtn(draft._new ? '#/' : '#/'))}
   <main class="form">
     <section class="card">
-      <label class="field"><span>Bike name</span>
-        <input data-bind="name" value="${esc(draft.name)}" placeholder="e.g. Enduro bike" autocomplete="off"></label>
+      <label class="field"><span>Name</span>
+        <input data-bind="name" value="${esc(draft.name)}" placeholder="${draft.kind === 'shock' ? 'e.g. Fox Float X2' : 'e.g. RockShox Lyrik'}" autocomplete="off"></label>
+      <div class="field"><span>Type</span>${seg('draft-set', 'kind', draft.kind, KINDS)}</div>
+      <label class="field"><span>Bike <em class="muted">(optional)</em></span>
+        <input data-bind="bike" value="${esc(draft.bike)}" placeholder="e.g. Enduro bike" autocomplete="off"></label>
     </section>
-    ${parts}
-    ${draft._new ? '' : '<button type="button" class="btn danger block" data-action="delete-bike">Delete bike</button>'}
+    <h3 class="section">Dials</h3>
+    ${draft.dials.map((d, i) => dialEditor(d, i)).join('') || '<p class="muted pad">Add the dials this one has:</p>'}
+    <div class="chips wrap">
+      ${PRESETS.filter(([n]) => !used.has(n)).map(([n], i) =>
+        `<button type="button" class="chip" data-action="add-dial" data-preset="${PRESETS.findIndex(([p]) => p === n)}">+ ${esc(n)}</button>`).join('')}
+      <button type="button" class="chip" data-action="add-dial" data-preset="-1">+ Custom dial</button>
+    </div>
+    ${draft._new ? '' : '<button type="button" class="btn danger block" data-action="delete-component">Delete this profile</button>'}
   </main>
-  <div class="dock"><button type="button" class="btn primary big block" data-action="save-bike">Save bike</button></div>`;
+  <div class="dock"><button type="button" class="btn primary big block" data-action="save-component">Save</button></div>`;
+}
+
+function dialEditor(d, i) {
+  const b = (k) => `dials.${i}.${k}`;
+  const isClicks = d.type === 'clicks';
+  return `<section class="card dial-edit">
+    <div class="dial-edit-head">
+      <input data-bind="${b('name')}" value="${esc(d.name)}" placeholder="Dial name" autocomplete="off" aria-label="Dial name">
+      <button type="button" class="icon-btn subtle" data-action="move-dial" data-index="${i}" data-dir="-1" aria-label="Move up" ${i === 0 ? 'disabled' : ''}>${ICON.up}</button>
+      <button type="button" class="icon-btn subtle" data-action="move-dial" data-index="${i}" data-dir="1" aria-label="Move down" ${i === draft.dials.length - 1 ? 'disabled' : ''}>${ICON.down}</button>
+      <button type="button" class="icon-btn subtle" data-action="del-dial" data-index="${i}" aria-label="Remove ${esc(d.name)}">✕</button>
+    </div>
+    <div class="field"><span>Measured in</span>
+      <select data-bind="${b('type')}" data-type="type">${Object.entries(TYPES).map(([k, t]) =>
+        `<option value="${k}" ${k === d.type ? 'selected' : ''}>${t.label}</option>`).join('')}</select></div>
+    ${d.type === 'custom' ? `<label class="field"><span>Unit</span><input data-bind="${b('unit')}" value="${esc(d.unit)}" placeholder="e.g. %, mm, lb" autocomplete="off"></label>` : ''}
+    <div class="three">
+      <label class="field"><span>Min</span><input inputmode="decimal" data-bind="${b('min')}" data-type="num" value="${esc(trim(d.min))}"></label>
+      <label class="field"><span>${isClicks ? 'Total clicks' : 'Max'}</span><input inputmode="decimal" data-bind="${b('max')}" data-type="num" value="${esc(trim(d.max))}"></label>
+      <label class="field"><span>Current</span><input inputmode="decimal" data-bind="${b('value')}" data-type="num" value="${esc(trim(d.value))}"></label>
+    </div>
+    ${isClicks ? '<p class="muted small">Count clicks from fully open (lowest), so 0 = fully open.</p>'
+      : `<label class="field narrow"><span>Each step</span><input inputmode="decimal" data-bind="${b('step')}" data-type="num" value="${esc(trim(d.step, 3))}"></label>`}
+  </section>`;
 }
 
 function setPath(obj, path, value) {
@@ -532,24 +584,40 @@ function setPath(obj, path, value) {
   o[keys.at(-1)] = value;
 }
 
-async function saveBike() {
+async function saveComponent() {
   const name = draft.name.trim();
-  if (!name) { toast('Give the bike a name'); $app.querySelector('[data-bind="name"]').focus(); return; }
-  const { _new, _stash, ...bike } = draft;
-  bike.name = name;
-  for (const [part] of PARTS) {
-    if (!bike[part]) continue;
-    bike[part].name = bike[part].name.trim();
-    bike[part].adjusters = bike[part].adjusters
-      .map((a) => ({ ...a, label: a.label.trim() }))
-      .filter((a) => a.label);
+  if (!name) { toast('Give it a name'); $app.querySelector('[data-bind="name"]').focus(); return; }
+  for (const d of draft.dials) {
+    d.name = d.name.trim();
+    if (!d.name) { toast('Every dial needs a name'); return; }
+    const t = TYPES[d.type];
+    d.min = d.min ?? t.min;
+    d.max = d.max ?? t.max;
+    d.step = d.type === 'clicks' ? 1 : d.step > 0 ? d.step : t.step;
+    if (d.max <= d.min) { toast(`${d.name}: max must be above min`); return; }
+    d.value = clamp(d.value ?? d.min, d.min, d.max);
   }
-  const i = state.bikes.findIndex((b) => b.id === bike.id);
-  if (i >= 0) state.bikes[i] = bike; else state.bikes.push(bike);
-  state.settings.lastBikeId = bike.id;
+  const { _new, ...comp } = draft;
+  comp.name = name;
+  comp.bike = comp.bike.trim();
+  const i = state.components.findIndex((c) => c.id === comp.id);
+  if (i >= 0) state.components[i] = comp; else state.components.push(comp);
+  // Drop or clamp pending dial moves that no longer fit the setup.
+  const p = state.pending[comp.id];
+  if (p) {
+    for (const id of Object.keys(p)) {
+      const d = comp.dials.find((x) => x.id === id);
+      if (!d) delete p[id]; else setPending(comp, d, clamp(p[id], d.min, d.max));
+    }
+  }
+  if (_new) {
+    state.entries.push({ id: uid(), componentId: comp.id, ts: Date.now(), start: true, changes: [], note: '',
+      snapshot: Object.fromEntries(comp.dials.map((d) => [d.id, d.value])) });
+  }
+  state.settings.lastPage = comp.id;
   await save();
   dirty = false;
-  toast('Bike saved');
+  toast('Saved');
   location.hash = '#/';
 }
 
@@ -559,27 +627,24 @@ function viewSettings() {
   const s = state.settings;
   return `${header('Settings', backBtn())}
   <main>
-    ${installCard(false)}
+    ${installCard()}
     <section class="card">
-      <h3>Quick launch</h3>
-      <p class="muted">Open SagBook from anywhere with a double-press, no hunting for the icon. Install the app first, then:</p>
-      <ul class="tips">
-        <li><b>Samsung:</b> Settings → Advanced features → Side button → <b>Double press</b> → Open app → <b>SagBook</b>.</li>
-        <li><b>Pixel:</b> Settings → System → Gestures → <b>Quick Tap</b> → Open app → <b>SagBook</b>, then double-tap the back of the phone.</li>
-        <li><b>Any phone:</b> long-press the SagBook icon → drag <b>Log change</b> onto your home screen for a one-tap shortcut.</li>
-      </ul>
+      <h3>Forks &amp; shocks</h3>
+      ${state.components.map((c) => `<a class="list-item" href="#/component/${c.id}">
+        <span><b>${esc(c.name)}</b><small>${esc([kindLabel(c.kind), c.bike, `${c.dials.length} dial${c.dials.length === 1 ? '' : 's'}`].filter(Boolean).join(' · '))}</small></span>${ICON.chevron}</a>`).join('')}
+      <div class="two">
+        <a class="btn block" href="#/component/new?kind=fork">${ICON.plus} Fork</a>
+        <a class="btn block" href="#/component/new?kind=shock">${ICON.plus} Shock</a>
+      </div>
     </section>
     <section class="card">
-      <h3>Units</h3>
-      <div class="field"><span>Air pressure</span>${seg('setting', 'pressureUnit', s.pressureUnit, [['psi', 'psi'], ['bar', 'bar']])}</div>
-      <div class="field"><span>Sag</span>${seg('setting', 'sagUnit', s.sagUnit, [['%', '%'], ['mm', 'mm']])}</div>
+      <h3>Quick launch (Galaxy)</h3>
+      <p class="muted">Double-press the side button to open SagBook:</p>
+      <p>Settings → Advanced features → Side button → <b>Double press</b> → turn on → <b>Open app</b> → <b>SagBook</b>.</p>
+    </section>
+    <section class="card">
+      <h3>Appearance</h3>
       <div class="field"><span>Theme</span>${seg('setting', 'theme', s.theme, [['auto', 'Auto'], ['dark', 'Dark'], ['light', 'Light']])}</div>
-    </section>
-    <section class="card">
-      <h3>Bikes</h3>
-      ${state.bikes.map((b) => `<a class="list-item" href="#/bike/${b.id}">
-        <span><b>${esc(b.name)}</b><small>${esc([b.fork?.name, b.shock?.name].filter(Boolean).join(' · ') || 'No components')}</small></span>${ICON.chevron}</a>`).join('')}
-      <a class="btn block" href="#/bike/new">${ICON.plus} Add bike</a>
     </section>
     <section class="card">
       <h3>Backup</h3>
@@ -608,15 +673,16 @@ async function exportData() {
   state.settings.lastBackup = Date.now();
   await save();
   toast(`Saved ${name} to Downloads`);
-  render();
+  rerenderKeepScroll();
 }
 
 async function importData(file) {
   try {
     const data = JSON.parse(await file.text());
-    if (!Array.isArray(data.bikes) || !Array.isArray(data.entries)) throw new Error('Not a SagBook backup');
-    if (!confirm(`Replace everything on this phone with this backup (${data.bikes.length} bikes, ${data.entries.length} entries)?`)) return;
-    state = migrate(data);
+    if (!Array.isArray(data.entries) || !(Array.isArray(data.components) || Array.isArray(data.bikes))) throw new Error('Not a SagBook backup');
+    const next = migrate(data);
+    if (!confirm(`Replace everything on this phone with this backup (${next.components.length} forks/shocks, ${next.entries.length} entries)?`)) return;
+    state = next;
     await save();
     applyTheme();
     toast('Backup restored');
@@ -649,20 +715,15 @@ function parseHash() {
 
 function render() {
   const { parts: [view, id], params } = parseHash();
-  // "#/log" on its own (the home-screen shortcut) logs for the last-used bike.
-  if (view === 'log' && !id) {
-    const bike = bikeById(state.settings.lastBikeId) || state.bikes[0];
-    location.replace(bike ? `#/log/${bike.id}` : '#/');
-    return;
-  }
   let html;
-  if (view === 'log') html = form && form.bikeId === id && !form.editId ? viewLog() : startForm(id, { fromId: params.get('from') }) ? viewLog() : viewMissing();
-  else if (view === 'edit') html = form && form.editId === id ? viewLog() : (entryById(id) && startForm(entryById(id).bikeId, { editId: id })) ? viewLog() : viewMissing();
+  if (view === 'component') html = draft && (draft.id === id || (id === 'new' && draft._new)) ? viewComponent() : startDraft(id, params) ? viewComponent() : viewMissing();
   else if (view === 'entry') html = viewEntry(id);
-  else if (view === 'bike') html = draft && (draft.id === id || (id === 'new' && draft._new)) ? viewBike() : startDraft(id) ? viewBike() : viewMissing();
   else if (view === 'settings') html = viewSettings();
-  else html = viewHome();
+  else html = viewMain();
+  const main = !view || !['component', 'entry', 'settings'].includes(view);
+  $app.classList.toggle('main-view', main && state.components.length > 0);
   $app.innerHTML = html;
+  if (main) setupPager();
   if (view === 'settings') showPersistStatus();
 }
 
@@ -673,69 +734,102 @@ window.addEventListener('hashchange', () => {
     return;
   }
   dirty = false;
-  form = null;
   draft = null;
   currentHash = location.hash;
   render();
   scrollTo(0, 0);
 });
 
+// Re-render the current screen, keeping the page and scroll position.
+function rerenderKeepScroll() {
+  const y = scrollY;
+  const pageScroll = document.querySelector(`.page[data-comp="${state.settings.lastPage}"]`)?.scrollTop;
+  const active = document.querySelector('.tab.on');
+  if (active) state.settings.lastPage = state.components[[...document.querySelectorAll('.tab')].indexOf(active)]?.id ?? state.settings.lastPage;
+  render();
+  scrollTo(0, y);
+  const page = document.querySelector(`.page[data-comp="${state.settings.lastPage}"]`);
+  if (page && pageScroll) page.scrollTop = pageScroll;
+}
+
 /* ---------- events ---------- */
 
 document.addEventListener('click', async (ev) => {
   const el = ev.target.closest('[data-action]');
-  if (!el || el.dataset.action === 'import' || el.dataset.action === 'toggle-part') return;
+  if (!el || el.dataset.action === 'import') return;
   const { action } = el.dataset;
-  if (action === 'pick-bike') {
-    state.settings.lastBikeId = el.dataset.id;
-    render();
+  const dialOf = () => {
+    const [cid, did] = el.closest('.dial').dataset.dial.split('|');
+    const comp = compById(cid);
+    return [comp, comp.dials.find((x) => x.id === did)];
+  };
+  if (action === 'goto-page') {
+    const pager = document.getElementById('pager');
+    pager.scrollTo({ left: +el.dataset.index * pager.clientWidth, behavior: 'smooth' });
+  } else if (action === 'nudge') {
+    const [comp, d] = dialOf();
+    stepDial(comp, d, +el.dataset.dir);
+  } else if (action === 'type-value') {
+    const [comp, d] = dialOf();
+    const input = prompt(`${d.name} (${fmt(d, d.min)}–${fmt(d, d.max)} ${unitOf(d)})`, fmt(d, current(comp, d)));
+    const n = num(input);
+    if (n == null) return;
+    setPending(comp, d, +clamp(n, d.min, d.max).toFixed(4));
+    refreshDial(comp, d);
     save();
-  } else if (action === 'step') {
-    const [part, key] = el.closest('.row').dataset.row.split('|');
-    stepField(part, key, +el.dataset.dir);
-  } else if (action === 'rate') {
-    const n = +el.dataset.value;
-    form.rating = form.rating === n ? 0 : n;
-    dirty = true;
-    $app.querySelectorAll('.star').forEach((s) => s.classList.toggle('on', +s.dataset.value <= form.rating));
-  } else if (action === 'save-entry') {
-    saveEntry();
+  } else if (action === 'undo') {
+    const comp = compById(el.dataset.id);
+    delete state.pending[comp.id];
+    await save();
+    rerenderKeepScroll();
+  } else if (action === 'save-changes') {
+    saveChanges(compById(el.dataset.id));
+  } else if (action === 'restore') {
+    const e = entryById(el.dataset.id);
+    const comp = compById(e.componentId);
+    for (const d of comp.dials) if (e.snapshot?.[d.id] != null) setPending(comp, d, clamp(e.snapshot[d.id], d.min, d.max));
+    state.settings.lastPage = comp.id;
+    await save();
+    toast(pendingCount(comp) ? 'Dials set back — set them on the bike, then Save' : 'Already set like this');
+    location.hash = '#/';
   } else if (action === 'delete-entry') {
     if (!confirm('Delete this entry?')) return;
-    state.entries = state.entries.filter((e) => e.id !== form.editId);
+    state.entries = state.entries.filter((e) => e.id !== el.dataset.id);
     await save();
-    dirty = false;
     toast('Entry deleted');
     location.hash = '#/';
-  } else if (action === 'toggle-baseline') {
-    const e = entryById(el.dataset.id);
-    e.baseline = !e.baseline;
-    await save();
-    render();
   } else if (action === 'draft-set') {
     setPath(draft, el.dataset.key, el.dataset.value);
     dirty = true;
     rerenderKeepScroll();
-  } else if (action === 'add-adj') {
-    draft[el.dataset.part].adjusters.push(adjuster(el.dataset.label));
+  } else if (action === 'add-dial') {
+    const preset = PRESETS[+el.dataset.preset];
+    const d = preset ? newDial(preset[0], preset[1], preset[2]) : newDial('', 'clicks');
+    if (d.type === 'psi') d.value = draft.kind === 'shock' ? 180 : 80;
+    draft.dials.push(d);
     dirty = true;
     rerenderKeepScroll();
-    if (!el.dataset.label) [...$app.querySelectorAll(`[data-bind^="${el.dataset.part}.adjusters."][data-bind$=".label"]`)].at(-1)?.focus();
-  } else if (action === 'del-adj') {
-    draft[el.dataset.part].adjusters.splice(+el.dataset.index, 1);
+    if (!preset) [...$app.querySelectorAll('.dial-edit-head input')].at(-1)?.focus();
+  } else if (action === 'del-dial') {
+    draft.dials.splice(+el.dataset.index, 1);
     dirty = true;
     rerenderKeepScroll();
-  } else if (action === 'save-bike') {
-    saveBike();
-  } else if (action === 'delete-bike') {
-    const n = state.entries.filter((e) => e.bikeId === draft.id).length;
-    if (!confirm(`Delete ${draft.name || 'this bike'} and its ${n} logged entr${n === 1 ? 'y' : 'ies'}? This can't be undone.`)) return;
-    state.bikes = state.bikes.filter((b) => b.id !== draft.id);
-    state.entries = state.entries.filter((e) => e.bikeId !== draft.id);
-    if (state.settings.lastBikeId === draft.id) state.settings.lastBikeId = null;
+  } else if (action === 'move-dial') {
+    const i = +el.dataset.index, j = i + +el.dataset.dir;
+    [draft.dials[i], draft.dials[j]] = [draft.dials[j], draft.dials[i]];
+    dirty = true;
+    rerenderKeepScroll();
+  } else if (action === 'save-component') {
+    saveComponent();
+  } else if (action === 'delete-component') {
+    const n = state.entries.filter((e) => e.componentId === draft.id).length;
+    if (!confirm(`Delete ${draft.name || 'this profile'} and its ${n} history entr${n === 1 ? 'y' : 'ies'}? This can't be undone.`)) return;
+    state.components = state.components.filter((c) => c.id !== draft.id);
+    state.entries = state.entries.filter((e) => e.componentId !== draft.id);
+    delete state.pending[draft.id];
     await save();
     dirty = false;
-    toast('Bike deleted');
+    toast('Deleted');
     location.hash = '#/';
   } else if (action === 'setting') {
     state.settings[el.dataset.key] = el.dataset.value;
@@ -752,29 +846,19 @@ document.addEventListener('click', async (ev) => {
     await installPrompt.userChoice;
     installPrompt = null;
     rerenderKeepScroll();
-  } else if (action === 'hide-install') {
-    try { localStorage.setItem('sagbook-hide-install', '1'); } catch { /* ignore */ }
-    toast('Install instructions are still in Settings');
-    rerenderKeepScroll();
   }
 });
 
 document.addEventListener('input', (ev) => {
   const t = ev.target;
-  if (t.dataset.field) {
-    const [part, key] = t.dataset.field.split('|');
-    form.vals[part][key] = t.value.trim();
-    dirty = true;
-    refreshRow(part, key);
-  } else if (t.dataset.meta) {
-    form[t.dataset.meta] = t.type === 'checkbox' ? t.checked : t.value;
-    dirty = true;
+  if (t.dataset.entryNote) {
+    const e = entryById(t.dataset.entryNote);
+    e.note = t.value;
+    saveSoon();
   } else if (t.dataset.bind && draft) {
     const type = t.dataset.type;
     let v = t.value;
     if (type === 'num') v = num(v);
-    else if (type === 'bool') v = t.checked;
-    else if (type === 'sag') v = num(v) == null ? null : { v: num(v), u: sUnit() };
     setPath(draft, t.dataset.bind, v);
     dirty = true;
   }
@@ -783,25 +867,18 @@ document.addEventListener('input', (ev) => {
 document.addEventListener('change', (ev) => {
   const t = ev.target;
   if (t.dataset.action === 'import' && t.files[0]) importData(t.files[0]);
-  if (t.dataset.action === 'toggle-part') {
-    const p = t.dataset.part;
-    if (t.checked) draft[p] = draft._stash[p] || defaultComponent();
-    else { draft._stash[p] = draft[p]; draft[p] = null; }
-    dirty = true;
+  // Switching what a dial is measured in resets its range to sensible defaults.
+  if (t.dataset.type === 'type' && draft) {
+    const d = draft.dials[+t.dataset.bind.split('.')[1]];
+    const def = TYPES[d.type];
+    Object.assign(d, { min: def.min, max: def.max, step: def.step, value: clamp(d.value ?? def.min, def.min, def.max) });
     rerenderKeepScroll();
   }
 });
 
-// Tapping a number selects it, so typing replaces the value.
-document.addEventListener('focusin', (ev) => {
-  if (ev.target.dataset?.field) ev.target.select();
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden' && state) save();
 });
-
-function rerenderKeepScroll() {
-  const y = scrollY;
-  render();
-  scrollTo(0, y);
-}
 
 /* ---------- persistence + updates ---------- */
 
@@ -813,7 +890,6 @@ async function showPersistStatus() {
 }
 
 let swReg = null;
-let pendingReload = false;
 
 async function registerSW() {
   if (!('serviceWorker' in navigator)) return;
@@ -826,11 +902,12 @@ async function registerSW() {
     if (document.visibilityState === 'visible') swReg.update().catch(() => {});
   });
   let reloading = false;
-  navigator.serviceWorker.addEventListener('controllerchange', () => {
+  navigator.serviceWorker.addEventListener('controllerchange', async () => {
     if (!hadController) { hadController = true; return; }
-    if (reloading) return;
-    if (dirty) { pendingReload = true; toast('Update ready — it applies after you save'); return; }
+    // Dial moves are already saved; only an open setup form can lose work.
+    if (reloading || dirty) return;
     reloading = true;
+    await save();
     sessionStorage.setItem('sagbook-updated', '1');
     location.reload();
   });
@@ -854,6 +931,10 @@ async function checkForUpdate() {
   applyTheme();
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
   render();
+  addEventListener('resize', () => {
+    const pager = document.getElementById('pager');
+    if (pager) pager.scrollLeft = pageIndex() * pager.clientWidth;
+  });
   if (sessionStorage.getItem('sagbook-updated')) {
     sessionStorage.removeItem('sagbook-updated');
     toast(`Updated to ${APP_VERSION}`);

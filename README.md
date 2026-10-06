@@ -1,7 +1,13 @@
 # SagBook
 
-A fast, offline phone app for logging mountain-bike suspension setup changes:
-air pressure, volume spacers, compression, rebound and sag, for multiple bikes.
+A fast, offline phone app for tracking mountain-bike suspension dials. Each
+fork and shock gets its own swipeable page of dials (rebound, compression, air
+pressure, spacers, preload…). Spin a dial as you change it on the bike, then
+tap Save to log the change.
+
+Set up profiles under **Settings → Forks & shocks**: for each dial choose
+clicks, turns, pressure, spacers or a custom unit, plus its min, max and
+current position.
 
 **Live app:** https://kieranburton30.github.io/sagbook/
 
@@ -16,11 +22,8 @@ air pressure, volume spacers, compression, rebound and sag, for multiple bikes.
 
 ## Quick launch (double-press)
 
-- **Samsung:** Settings → Advanced features → Side button → Double press →
-  Open app → SagBook.
-- **Pixel:** Settings → System → Gestures → Quick Tap → Open app → SagBook.
-- **Any phone:** long-press the SagBook icon and drag **Log change** onto the
-  home screen.
+Galaxy S24: Settings → Advanced features → Side button → Double press → Open
+app → SagBook.
 
 ## Updating the app from the PC
 
