@@ -312,14 +312,12 @@ svg { flex: none; }
 .gloss { position: absolute; top: 6%; bottom: 6%; left: 16%; width: 14%; border-radius: 999px; background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.14), transparent); pointer-events: none; }
 
 /* direction buttons under the knob */
-.dir-row { flex: none; display: flex; justify-content: space-between; gap: 12px; width: 100%; padding: 2px 0 8px; }
-.dir {
-  flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 50px;
-  border: 0; border-radius: 14px; background: var(--card); color: var(--text); font-weight: 750; font-size: 16px;
-  cursor: pointer; touch-action: manipulation;
+.dir-row {
+  flex: none; display: flex; justify-content: space-between; width: min(100%, 340px); padding: 0 8px 12px;
+  font-size: 14px; font-weight: 700; color: var(--muted);
 }
-.dir svg { width: 20px; height: 20px; color: var(--muted); }
-.dir:active { background: var(--field); }
+.dir-row span { display: inline-flex; align-items: center; gap: 6px; }
+.dir-row svg { width: 16px; height: 16px; }
 
 /* ---------- dial tiles ---------- */
 .tiles { flex: none; display: grid; grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); gap: 6px; padding-bottom: 10px; }

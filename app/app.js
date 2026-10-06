@@ -1,6 +1,6 @@
 // SagBook: suspension dial log. Plain JS, no build step.
 // tools/update.ps1 rewrites APP_VERSION on every publish.
-const APP_VERSION = '2026.10.07-0111';
+const APP_VERSION = '2026.10.07-0115';
 const PSI_PER_BAR = 14.5038;
 
 const $app = document.getElementById('app');
@@ -450,21 +450,14 @@ function deltaHtml(d, v) {
   return `<span>${esc(effectText(d, d.value, v))}</span><button type="button" class="reset" data-action="reset-dial" aria-label="Reset ${esc(d.name)}">${ICON.undo}</button>`;
 }
 
-// The buttons under the knob say what each direction does and nudge one step.
+// Small labels under the control saying what each direction does.
 function dirRow(d) {
   const fx = effectOf(d);
   if (isSlider(d)) {
-    return `<div class="dir-row">
-    <button type="button" class="dir" data-action="nudge" data-dir="-1">${ICON.down}<span>${esc(cap(fx.down))}</span></button>
-    <button type="button" class="dir" data-action="nudge" data-dir="1"><span>${esc(cap(fx.up))}</span>${ICON.up}</button>
-  </div>`;
+    return `<div class="dir-row"><span>${ICON.down}${esc(cap(fx.down))}</span><span>${esc(cap(fx.up))}${ICON.up}</span></div>`;
   }
-  const less = { dir: -1, label: cap(fx.down) }, more = { dir: 1, label: cap(fx.up) };
-  const [ccw, cw] = d.reverse ? [more, less] : [less, more];
-  return `<div class="dir-row">
-    <button type="button" class="dir" data-action="nudge" data-dir="${ccw.dir}">${ICON.ccw}<span>${esc(ccw.label)}</span></button>
-    <button type="button" class="dir" data-action="nudge" data-dir="${cw.dir}"><span>${esc(cw.label)}</span>${ICON.cw}</button>
-  </div>`;
+  const [ccw, cw] = d.reverse ? [fx.up, fx.down] : [fx.down, fx.up];
+  return `<div class="dir-row"><span>${ICON.ccw}${esc(cap(ccw))}</span><span>${esc(cap(cw))}${ICON.cw}</span></div>`;
 }
 
 function heroHtml(comp, d) {
@@ -1128,10 +1121,6 @@ document.addEventListener('click', async (ev) => {
     fitDials();
     buzz(5);
     saveSoon();
-  } else if (action === 'nudge') {
-    const [comp, d] = heroTarget(el);
-    if (stepDial(comp, d, +el.dataset.dir)) refreshDial(comp, d);
-    else buzz(40);
   } else if (action === 'reset-dial') {
     const [comp, d] = heroTarget(el);
     setPending(comp, d, d.value);
