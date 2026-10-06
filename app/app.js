@@ -1,6 +1,6 @@
 // SagBook: suspension dial log. Plain JS, no build step.
 // tools/update.ps1 rewrites APP_VERSION on every publish.
-const APP_VERSION = '2026.10.07-0054';
+const APP_VERSION = '2026.10.07-0102';
 const PSI_PER_BAR = 14.5038;
 
 const $app = document.getElementById('app');
@@ -44,11 +44,12 @@ function fmtDay(ts) {
 const fmtTime = (ts) => new Date(ts).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 
 let toastTimer;
-function toast(msg) {
-  $toast.textContent = msg;
+function toast(msg, action) {
+  $toast.innerHTML = esc(msg) + (action ? ` <a href="${action.href}">${esc(action.label)}</a>` : '');
+  $toast.classList.toggle('has-action', !!action);
   $toast.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => $toast.classList.remove('show'), 2600);
+  toastTimer = setTimeout(() => $toast.classList.remove('show'), action ? 4000 : 2400);
 }
 const buzz = (ms) => { try { navigator.vibrate?.(ms); } catch { /* unsupported */ } };
 
@@ -295,7 +296,6 @@ const seg = (action, key, value, options, extra = '') => `<div class="seg">${opt
 
 let installPrompt = null;
 const isInstalled = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
-const isPhone = () => /Android|iPhone|iPad/i.test(navigator.userAgent);
 
 // Explains how to install from whichever browser the page was opened in.
 function installSteps() {
@@ -320,8 +320,6 @@ function installCard() {
     ${installPrompt
       ? '<button type="button" class="btn primary block" data-action="install">Install app</button>'
       : `<p class="steps">${installSteps()}</p>`}
-    ${!isPhone() ? `<div class="qr"><img src="icons/qr.svg" alt="QR code for the SagBook link" width="160" height="160">
-      <p class="muted">Scan with your phone's camera to open SagBook there.</p></div>` : ''}
   </section>`;
 }
 
@@ -343,17 +341,18 @@ function viewMain() {
     ${installCard()}
     <main class="empty">
       <div class="empty-dial" aria-hidden="true"><div class="knob c-red"><span class="notch"></span></div></div>
-      <h2>Set up your suspension</h2>
-      <p class="muted">Add your fork and shock, tell SagBook which dials they have and where they're set. Then spin the dials here whenever you change them on the bike.</p>
+      <h2>Add your suspension</h2>
       <div class="empty-actions">
-        <a class="btn primary big" href="#/component/new?kind=fork">Add fork</a>
-        <a class="btn big" href="#/component/new?kind=shock">Add shock</a>
+        <a class="btn primary big" href="#/component/new?kind=fork">Fork</a>
+        <a class="btn big" href="#/component/new?kind=shock">Shock</a>
       </div>
     </main>`;
   }
+  const cur = state.components[pageIndex()];
   return `<header class="main-top">
     <nav class="tabs" id="tabs">${state.components.map((c, i) =>
       `<button type="button" class="tab" data-action="goto-page" data-index="${i}">${esc(c.name)}${pendingDials(c).length ? '<i class="dot"></i>' : ''}</button>`).join('')}</nav>
+    <a class="icon-btn" id="hist-link" href="#/history/${cur.id}" aria-label="History">${ICON.clock}</a>
     <a class="icon-btn" href="#/settings" aria-label="Settings">${ICON.gear}</a>
   </header>
   <div class="pager" id="pager">${state.components.map(pageHtml).join('')}</div>`;
@@ -361,18 +360,28 @@ function viewMain() {
 
 function pageHtml(comp) {
   const sel = selectedDial(comp);
-  const count = entriesFor(comp.id).length;
+  if (!sel) {
+    return `<section class="page" data-comp="${comp.id}">
+      <div class="no-dials"><a class="btn primary" href="#/component/${comp.id}">Add dials</a></div>
+    </section>`;
+  }
+  const list = dialsIn(comp, activeSection(comp));
   return `<section class="page" data-comp="${comp.id}">
-    <div class="page-head">
-      <div class="page-title"><h2>${esc(comp.name)}</h2><span>${esc([kindLabel(comp.kind), comp.bike].filter(Boolean).join(' · '))}</span></div>
-      <a class="pill-btn" href="#/history/${comp.id}">${ICON.clock}<span>${count}</span></a>
-      <a class="pill-btn" href="#/component/${comp.id}" aria-label="Set up dials">${ICON.sliders}</a>
-    </div>
-    ${sel ? `${sectionTabs(comp)}${heroHtml(comp, sel)}
-      <div class="tiles">${dialsIn(comp, activeSection(comp)).map((d) => tileHtml(comp, d, d === sel)).join('')}</div>`
-      : `<div class="no-dials"><p class="muted">No dials set up yet.</p><a class="btn primary" href="#/component/${comp.id}">Add dials</a></div>`}
+    ${sectionTabs(comp)}
+    ${heroHtml(comp, sel)}
+    ${list.length > 1 ? `<div class="tiles">${list.map((d) => tileHtml(comp, d, d === sel)).join('')}</div>` : ''}
     ${saveBar(comp)}
   </section>`;
+}
+
+function sectionTabs(comp) {
+  const active = activeSection(comp);
+  const avail = SECTIONS.filter(([sec]) => dialsIn(comp, sec).length);
+  if (avail.length < 2) return '';
+  return `<div class="sections">${avail.map(([sec, label]) => {
+    const changed = dialsIn(comp, sec).some((d) => current(comp, d) !== d.value);
+    return `<button type="button" class="${sec === active ? 'on' : ''}" data-action="section" data-sec-btn="${comp.id}|${sec}">${label}${changed ? '<i class="dot"></i>' : ''}</button>`;
+  }).join('')}</div>`;
 }
 
 /* ----- the big dial ----- */
@@ -381,114 +390,97 @@ function ticksSvg(d, v) {
   const g = geom(d), dir = dirOf(d);
   const line = (deg, r1, r2, cls, attrs = '') => {
     const a = (deg - 90) * Math.PI / 180;
-    const p = (r) => `${(100 + r * Math.cos(a)).toFixed(2)} ${(100 + r * Math.sin(a)).toFixed(2)}`;
-    const [x1, y1] = p(r1).split(' '), [x2, y2] = p(r2).split(' ');
-    return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" class="${cls}" ${attrs}/>`;
+    const x = (r) => (100 + r * Math.cos(a)).toFixed(2);
+    const y = (r) => (100 + r * Math.sin(a)).toFixed(2);
+    return `<line x1="${x(r1)}" y1="${y(r1)}" x2="${x(r2)}" y2="${y(r2)}" class="${cls}" ${attrs}/>`;
   };
   let out = '';
   if (g.ring) {
     const idx = stepIndex(d, v);
     for (let i = 0; i <= g.steps; i++) {
       const major = i === 0 || i === g.steps || i % 5 === 0;
-      out += line(i * g.deg * dir, major ? 80 : 85, 96, `tk${major ? ' mj' : ''}${i <= idx ? ' on' : ''}`, `data-i="${i}"`);
+      out += line(i * g.deg * dir, major ? 82 : 87, 96, `tk${major ? ' mj' : ''}${i <= idx ? ' on' : ''}`, `data-i="${i}"`);
     }
   } else {
-    for (let i = 0; i < g.marks; i++) out += line((360 / g.marks) * i, i === 0 ? 80 : 86, 96, `tk${i === 0 ? ' mj on' : ''}`);
+    for (let i = 0; i < g.marks; i++) out += line((360 / g.marks) * i, i === 0 ? 82 : 88, 96, `tk${i === 0 ? ' mj on' : ''}`);
   }
   return `<svg class="ticks" viewBox="0 0 200 200" aria-hidden="true">${out}</svg>`;
 }
 
+// "6 /16", "1½ /4 turns", "72 psi"
 function readoutHtml(d, v) {
-  const showMax = d.type === 'clicks' || d.type === 'turns' || d.type === 'spacers';
-  return `<b>${fmt(d, v)}</b><span>${showMax ? `/ ${fmt(d, d.max)} ` : ''}${esc(unitOf(d))}</span>`;
+  if (d.type === 'clicks' || d.type === 'spacers') return `<b>${fmt(d, v)}</b><span>/${fmt(d, d.max)}</span>`;
+  if (d.type === 'turns') return `<b>${fmt(d, v)}</b><span>/${fmt(d, d.max)} turns</span>`;
+  return `<b>${fmt(d, v)}</b><span>${esc(unitOf(d))}</span>`;
 }
 
-// What turning a dial up or down actually does to the ride. Counting starts
-// fully open, so a higher number always means more damping.
+// What turning a dial up or down does to the ride. Counting starts fully
+// open, so a higher number always means more damping.
 function effectOf(d) {
   const n = (d?.name || '').toLowerCase();
-  if (/reb|lsr|hsr/.test(n)) return { up: 'slower', down: 'faster', upLong: 'more rebound damping', downLong: 'less rebound damping' };
-  if (/comp|lsc|hsc|climb|lock|threshold|pedal/.test(n)) return { up: 'firmer', down: 'softer', upLong: 'more compression', downLong: 'less compression' };
-  if (d?.type === 'psi' || d?.type === 'bar') return { up: 'firmer', down: 'softer', upLong: 'more air', downLong: 'less air' };
-  if (d?.type === 'spacers') return { up: 'more ramp-up', down: 'less ramp-up', upLong: 'more progressive', downLong: 'more linear' };
-  if (/pre ?load/.test(n)) return { up: 'more preload', down: 'less preload', upLong: 'more preload', downLong: 'less preload' };
-  return { up: 'up', down: 'down', upLong: 'increase', downLong: 'decrease' };
+  if (/reb|lsr|hsr/.test(n)) return { up: 'slower', down: 'faster' };
+  if (/comp|lsc|hsc|climb|lock|threshold|pedal/.test(n)) return { up: 'firmer', down: 'softer' };
+  if (d?.type === 'psi' || d?.type === 'bar') return { up: 'firmer', down: 'softer' };
+  if (d?.type === 'spacers') return { up: 'more progressive', down: 'more linear' };
+  return { up: 'more', down: 'less' };
 }
 const cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
 
-// "+2 slower", "−¼ less preload"
+// "+2 slower", "−¼ less"
 function effectText(d, from, to) {
   if (from == null || to == null || from === to) return '';
   const fx = effectOf(d);
   const diff = to - from;
-  const amount = d ? fmt(d, Math.abs(diff)) : trim(Math.abs(diff));
+  const amount = d?.type ? fmt(d, Math.abs(diff)) : trim(Math.abs(diff));
   return `${diff > 0 ? '+' : '−'}${amount} ${diff > 0 ? fx.up : fx.down}`;
 }
 
 function deltaHtml(d, v) {
-  if (v !== d.value) {
-    return `<span class="was">was ${fmt(d, d.value)} · <b>${esc(effectText(d, d.value, v))}</b></span><button type="button" class="reset" data-action="reset-dial">${ICON.undo} Reset</button>`;
-  }
-  return '<span class="hint">Spin to adjust · tap the number to type it</span>';
+  if (v === d.value) return '';
+  return `<span>${esc(effectText(d, d.value, v))}</span><button type="button" class="reset" data-action="reset-dial" aria-label="Reset ${esc(d.name)}">${ICON.undo}</button>`;
 }
 
-// Labels either side of the knob so it's obvious which way does what.
-function dirLabels(d) {
+// The buttons under the knob say what each direction does and nudge one step.
+function dirRow(d) {
   const fx = effectOf(d);
-  const more = `<b>${esc(cap(fx.up))}</b><small>${esc(fx.upLong)}</small>`;
-  const less = `<b>${esc(cap(fx.down))}</b><small>${esc(fx.downLong)}</small>`;
+  const less = { dir: -1, label: cap(fx.down) }, more = { dir: 1, label: cap(fx.up) };
   const [ccw, cw] = d.reverse ? [more, less] : [less, more];
-  return `<div class="dir-labels"><span class="ccw">${ICON.ccw}<span>${ccw}</span></span><span class="cw"><span>${cw}</span>${ICON.cw}</span></div>`;
+  return `<div class="dir-row">
+    <button type="button" class="dir" data-action="nudge" data-dir="${ccw.dir}">${ICON.ccw}<span>${esc(ccw.label)}</span></button>
+    <button type="button" class="dir" data-action="nudge" data-dir="${cw.dir}"><span>${esc(cw.label)}</span>${ICON.cw}</button>
+  </div>`;
 }
 
 function heroHtml(comp, d) {
   const v = current(comp, d);
-  const g = geom(d);
-  const pct = (clamp(v, d.min, d.max) - d.min) / ((d.max - d.min) || 1);
   return `<div class="hero ${v !== d.value ? 'changed' : ''}" data-hero="${comp.id}|${d.id}">
-    <div class="hero-name">${esc(d.name)}</div>
     <div class="readout">
-      <button type="button" class="nudge" data-action="nudge" data-dir="-1" aria-label="Decrease">−</button>
-      <button type="button" class="value" data-action="type-value" aria-label="Type a value">${readoutHtml(d, v)}</button>
-      <button type="button" class="nudge" data-action="nudge" data-dir="1" aria-label="Increase">+</button>
+      <span class="hero-name">${esc(d.name)}</span>
+      <button type="button" class="value" data-action="type-value" aria-label="Type a value for ${esc(d.name)}">${readoutHtml(d, v)}</button>
+      <div class="delta">${deltaHtml(d, v)}</div>
     </div>
-    <div class="delta">${deltaHtml(d, v)}</div>
-    <div class="dial-big" role="slider" tabindex="0" aria-label="${esc(d.name)}" aria-valuemin="${d.min}" aria-valuemax="${d.max}" aria-valuenow="${v}">
-      ${ticksSvg(d, v)}
-      <div class="knob c-${dialColor(d)}" style="--rot:${angleFor(d, v).toFixed(2)}deg"><span class="notch"></span></div>
+    <div class="dial-slot">
+      <div class="dial-big" role="slider" tabindex="0" aria-label="${esc(d.name)}" aria-valuemin="${d.min}" aria-valuemax="${d.max}" aria-valuenow="${v}">
+        ${ticksSvg(d, v)}
+        <div class="knob c-${dialColor(d)}" style="--rot:${angleFor(d, v).toFixed(2)}deg"><span class="notch"></span></div>
+      </div>
     </div>
-    ${dirLabels(d)}
-    ${g.ring ? '' : `<div class="range"><span>${fmt(d, d.min)}</span><div class="bar"><i style="width:${(pct * 100).toFixed(1)}%"></i></div><span>${fmt(d, d.max)}</span></div>`}
+    ${dirRow(d)}
   </div>`;
 }
 
 function tileHtml(comp, d, selected) {
   const v = current(comp, d);
-  const pct = (clamp(v, d.min, d.max) - d.min) / ((d.max - d.min) || 1);
   return `<button type="button" class="tile ${selected ? 'sel' : ''} ${v !== d.value ? 'changed' : ''}" data-action="select-dial" data-tile="${comp.id}|${d.id}">
-    <span class="t-name"><i class="sw c-${dialColor(d)}"></i>${esc(d.name)}</span>
-    <span class="t-val">${fmt(d, v)}<small>${['clicks', 'turns', 'spacers'].includes(d.type) ? `/${fmt(d, d.max)}` : ` ${esc(unitOf(d))}`}</small></span>
-    <span class="t-bar"><i style="width:${(pct * 100).toFixed(1)}%"></i></span>
+    <span class="t-name"><i class="sw c-${dialColor(d)}"></i>${esc(d.name)}</span><b>${fmt(d, v)}</b>
   </button>`;
-}
-
-function sectionTabs(comp) {
-  const active = activeSection(comp);
-  const avail = SECTIONS.filter(([sec]) => dialsIn(comp, sec).length);
-  if (avail.length < 2) return '';
-  return `<div class="sections">${avail.map(([sec, label, blurb]) => {
-    const changed = dialsIn(comp, sec).some((d) => current(comp, d) !== d.value);
-    return `<button type="button" class="section-btn ${sec === active ? 'on' : ''}" data-action="section" data-sec-btn="${comp.id}|${sec}">
-      <b>${label}${changed ? '<i class="dot"></i>' : ''}</b><small>${blurb}</small></button>`;
-  }).join('')}</div>`;
 }
 
 function saveBar(comp) {
   const n = pendingDials(comp).length;
   return `<div class="savebar ${n ? 'show' : ''}" data-savebar="${comp.id}">
-    <span class="count">${plural(n, 'change')}</span>
-    <button type="button" class="btn" data-action="undo" data-id="${comp.id}">Undo all</button>
-    <button type="button" class="btn primary" data-action="open-save" data-id="${comp.id}">Save</button>
+    <button type="button" class="btn" data-action="undo" data-id="${comp.id}" aria-label="Undo all changes">${ICON.undo}</button>
+    <button type="button" class="btn primary" data-action="save-now" data-id="${comp.id}">Save ${plural(n, 'change')}</button>
   </div>`;
 }
 
@@ -500,16 +492,16 @@ function refreshDial(comp, d, residual = 0) {
     hero.classList.toggle('changed', v !== d.value);
     hero.querySelector('.value').innerHTML = readoutHtml(d, v);
     hero.querySelector('.delta').innerHTML = deltaHtml(d, v);
-    const knob = hero.querySelector('.knob');
-    knob.style.setProperty('--rot', `${(angleFor(d, v) + residual).toFixed(2)}deg`);
+    hero.querySelector('.knob').style.setProperty('--rot', `${(angleFor(d, v) + residual).toFixed(2)}deg`);
     hero.querySelector('.dial-big').setAttribute('aria-valuenow', v);
     const idx = stepIndex(d, v);
     hero.querySelectorAll('.tk[data-i]').forEach((t) => t.classList.toggle('on', +t.dataset.i <= idx));
-    const bar = hero.querySelector('.range i');
-    if (bar) bar.style.width = `${(((clamp(v, d.min, d.max) - d.min) / ((d.max - d.min) || 1)) * 100).toFixed(1)}%`;
   }
   const tile = $app.querySelector(`[data-tile="${comp.id}|${d.id}"]`);
-  if (tile) tile.outerHTML = tileHtml(comp, d, tile.classList.contains('sel'));
+  if (tile) {
+    tile.classList.toggle('changed', v !== d.value);
+    tile.querySelector('b').textContent = fmt(d, v);
+  }
   refreshSaveBar(comp);
 }
 
@@ -518,10 +510,10 @@ function refreshSaveBar(comp) {
   const bar = $app.querySelector(`[data-savebar="${comp.id}"]`);
   if (bar) {
     bar.classList.toggle('show', n > 0);
-    bar.querySelector('.count').textContent = plural(n, 'change');
+    bar.querySelector('.primary').textContent = `Save ${plural(n, 'change')}`;
   }
   for (const [sec] of SECTIONS) {
-    const btn = $app.querySelector(`[data-sec-btn="${comp.id}|${sec}"] b`);
+    const btn = $app.querySelector(`[data-sec-btn="${comp.id}|${sec}"]`);
     if (!btn) continue;
     const changed = dialsIn(comp, sec).some((d) => current(comp, d) !== d.value);
     const dot = btn.querySelector('.dot');
@@ -534,6 +526,18 @@ function refreshSaveBar(comp) {
     if (n && !dot) tab.insertAdjacentHTML('beforeend', '<i class="dot"></i>');
     if (!n && dot) dot.remove();
   }
+}
+
+// Size each knob to the space left on screen, so nothing ever scrolls.
+const slotObserver = new ResizeObserver((entries) => {
+  for (const { target } of entries) {
+    const size = Math.max(110, Math.min(target.clientWidth, target.clientHeight, 340) - 6);
+    target.firstElementChild?.style.setProperty('--size', `${size}px`);
+  }
+});
+function fitDials() {
+  slotObserver.disconnect();
+  $app.querySelectorAll('.dial-slot').forEach((s) => slotObserver.observe(s));
 }
 
 function stepDial(comp, d, dir) {
@@ -643,6 +647,8 @@ function setupPager() {
 function markTab(i) {
   const tabs = document.querySelectorAll('.tab');
   tabs.forEach((t, j) => t.classList.toggle('on', i === j));
+  const hist = document.getElementById('hist-link');
+  if (hist && state.components[i]) hist.href = `#/history/${state.components[i].id}`;
   const tab = tabs[i], nav = document.getElementById('tabs');
   if (tab && nav) nav.scrollTo({ left: tab.offsetLeft - nav.clientWidth / 2 + tab.clientWidth / 2, behavior: 'smooth' });
 }
@@ -666,39 +672,21 @@ function closeSheet(instant) {
   setTimeout(() => wrap.remove(), 220);
 }
 
-function openSaveSheet(comp) {
+async function saveNow(comp) {
   const changed = pendingDials(comp);
   if (!changed.length) return;
-  openSheet(`<h3>Save ${plural(changed.length, 'change')}</h3>
-    <p class="muted sheet-sub">${esc(comp.name)}</p>
-    <ul class="change-list">${changed.map((d) => `<li><span>${esc(d.name)}</span><span>${fmt(d, d.value)} → <b>${fmt(d, current(comp, d))}</b> <small>${esc(unitOf(d))} · ${esc(effectText(d, d.value, current(comp, d)))}</small></span></li>`).join('')}</ul>
-    <div class="field"><span>How did it feel? <em class="muted">(optional)</em></span>
-      <div class="tag-row">${TAGS.map((t) => `<button type="button" class="tag" data-action="toggle-tag">${esc(t)}</button>`).join('')}</div></div>
-    <label class="field"><span>Note <em class="muted">(optional)</em></span>
-      <textarea class="sheet-note" rows="2" placeholder="Trail, conditions, what to try next…"></textarea></label>
-    <div class="sheet-actions">
-      <button type="button" class="btn" data-action="close-sheet">Cancel</button>
-      <button type="button" class="btn primary" data-action="confirm-save" data-id="${comp.id}">Save</button>
-    </div>`);
-}
-
-async function confirmSave(comp) {
-  const sheet = document.querySelector('.sheet');
-  const tags = [...sheet.querySelectorAll('.tag.on')].map((t) => t.textContent);
-  const note = sheet.querySelector('.sheet-note').value.trim();
-  const changed = pendingDials(comp);
   const changes = changed.map((d) => ({ dialId: d.id, name: d.name, unit: unitOf(d), from: d.value, to: current(comp, d) }));
   for (const d of changed) d.value = current(comp, d);
   delete state.pending[comp.id];
-  state.entries.push({
-    id: uid(), componentId: comp.id, ts: Date.now(), changes, tags, note,
+  const entry = {
+    id: uid(), componentId: comp.id, ts: Date.now(), changes, tags: [], note: '',
     snapshot: Object.fromEntries(comp.dials.map((d) => [d.id, d.value])),
-  });
+  };
+  state.entries.push(entry);
   await save();
-  closeSheet();
   buzz(25);
-  toast('Saved to history');
   rerenderKeepScroll();
+  toast('Saved', { label: 'Add note', href: `#/entry/${entry.id}` });
 }
 
 function openValueSheet(comp, d) {
@@ -798,22 +786,18 @@ function startDraft(id, params) {
 
 function viewComponent() {
   const used = new Set(draft.dials.map((d) => d.name));
-  return `${header(draft._new ? `New ${kindLabel(draft.kind).toLowerCase()}` : 'Set up dials', backBtn())}
+  return `${header(draft._new ? `New ${kindLabel(draft.kind).toLowerCase()}` : esc(draft.name || 'Setup'), backBtn())}
   <main class="form">
     <section class="card">
-      <label class="field"><span>Name</span>
-        <input data-bind="name" value="${esc(draft.name)}" placeholder="${draft.kind === 'shock' ? 'e.g. Fox Float X2' : 'e.g. RockShox Lyrik'}" autocomplete="off"></label>
-      <div class="field"><span>Type</span>${seg('draft-set', 'kind', draft.kind, KINDS)}</div>
-      <label class="field"><span>Bike <em class="muted">(optional)</em></span>
-        <input data-bind="bike" value="${esc(draft.bike)}" placeholder="e.g. Enduro bike" autocomplete="off"></label>
+      <input class="name-input" data-bind="name" value="${esc(draft.name)}" placeholder="${draft.kind === 'shock' ? 'Shock name, e.g. Float X2' : 'Fork name, e.g. Lyrik'}" autocomplete="off" aria-label="Name">
+      ${seg('draft-set', 'kind', draft.kind, KINDS)}
     </section>
-    <h3 class="section">Dials</h3>
-    ${draft.dials.map((d, i) => dialEditor(d, i)).join('') || '<p class="muted pad">Tap the dials this one has. You can rename and adjust them after.</p>'}
+    ${draft.dials.map((d, i) => dialEditor(d, i)).join('')}
     <div class="chips wrap">
       ${PRESETS.map(([n], i) => (used.has(n) ? '' : `<button type="button" class="chip" data-action="add-dial" data-preset="${i}">+ ${esc(n)}</button>`)).join('')}
-      <button type="button" class="chip" data-action="add-dial" data-preset="-1">+ Custom dial</button>
+      <button type="button" class="chip" data-action="add-dial" data-preset="-1">+ Other</button>
     </div>
-    ${draft._new ? '' : '<button type="button" class="btn danger block" data-action="delete-component">Delete this profile</button>'}
+    ${draft._new ? '' : '<button type="button" class="btn danger block" data-action="delete-component">Delete</button>'}
   </main>
   <div class="dock"><button type="button" class="btn primary big block" data-action="save-component">Save</button></div>`;
 }
@@ -825,36 +809,23 @@ function numField(i, key, label, value, dp = 3) {
 function dialEditor(d, i) {
   const t = typeTab(d);
   const attrs = `data-index="${i}"`;
-  let fields = '';
-  if (t === 'clicks') {
-    fields = `<div class="three">${numField(i, 'min', 'Lowest click', d.min)}${numField(i, 'max', 'Total clicks', d.max)}${numField(i, 'value', 'Current click', d.value)}</div>
-      <p class="muted small">Count clicks up from the lowest setting (fully open = 0).</p>`;
-  } else if (t === 'turns') {
-    fields = `<div class="three">${numField(i, 'min', 'Min turns', d.min)}${numField(i, 'max', 'Max turns', d.max)}${numField(i, 'value', 'Current', d.value)}</div>
-      <div class="field"><span>Snaps every</span>${seg('dial-set', 'step', d.step, [[0.25, '¼ turn'], [0.125, '⅛ turn'], [0.0625, '1/16 turn']], attrs)}</div>`;
-  } else if (t === 'pressure') {
-    fields = `<div class="field"><span>Unit</span>${seg('dial-set', 'type', d.type, [['psi', 'psi'], ['bar', 'bar']], attrs)}</div>
-      <div class="three">${numField(i, 'min', 'Min', d.min)}${numField(i, 'max', 'Max', d.max)}${numField(i, 'value', 'Current', d.value)}</div>
-      <p class="muted small">Set min and max to this ${draft.kind === 'shock' ? 'shock' : draft.kind === 'fork' ? 'fork' : 'unit'}'s range (up to whatever it's rated for).</p>`;
-  } else if (t === 'spacers') {
-    fields = `<div class="three">${numField(i, 'min', 'Min', d.min)}${numField(i, 'max', 'Max', d.max)}${numField(i, 'value', 'Current', d.value)}</div>`;
-  } else {
-    fields = `<div class="two"><label class="field"><span>Unit</span><input data-bind="dials.${i}.unit" value="${esc(d.unit)}" placeholder="e.g. %, mm, lb" autocomplete="off"></label>
-      ${numField(i, 'step', 'Each step', d.step)}</div>
-      <div class="three">${numField(i, 'min', 'Min', d.min)}${numField(i, 'max', 'Max', d.max)}${numField(i, 'value', 'Current', d.value)}</div>`;
+  let options = '';
+  if (t === 'pressure') options += `<div class="field"><span>Unit</span>${seg('dial-set', 'type', d.type, [['psi', 'psi'], ['bar', 'bar']], attrs)}</div>`;
+  if (t === 'turns') options += `<div class="field"><span>Snap</span>${seg('dial-set', 'step', d.step, [[0.25, '¼'], [0.125, '⅛'], [0.0625, '1/16']], attrs)}</div>`;
+  if (t === 'custom') {
+    options += `<div class="two"><label class="field"><span>Unit</span><input data-bind="dials.${i}.unit" value="${esc(d.unit)}" placeholder="%, mm…" autocomplete="off"></label>${numField(i, 'step', 'Step', d.step)}</div>`;
   }
+  options += `<div class="field"><span>Clockwise</span>${seg('dial-set', 'reverse', d.reverse, [[false, 'Increases'], [true, 'Decreases']], attrs)}</div>`;
   return `<section class="card dial-edit">
     <div class="dial-edit-head">
       <i class="sw big c-${dialColor(d)}"></i>
       <input data-bind="dials.${i}.name" value="${esc(d.name)}" placeholder="Dial name" autocomplete="off" aria-label="Dial name">
-      <button type="button" class="icon-btn subtle" data-action="move-dial" data-index="${i}" data-dir="-1" aria-label="Move up" ${i === 0 ? 'disabled' : ''}>${ICON.up}</button>
-      <button type="button" class="icon-btn subtle" data-action="move-dial" data-index="${i}" data-dir="1" aria-label="Move down" ${i === draft.dials.length - 1 ? 'disabled' : ''}>${ICON.down}</button>
       <button type="button" class="icon-btn subtle" data-action="del-dial" data-index="${i}" aria-label="Remove ${esc(d.name)}">${ICON.x}</button>
     </div>
-    <div class="field"><span>Measured in</span>${seg('dial-set', 'tab', t, TYPE_TABS, attrs)}</div>
-    ${fields}
-    <div class="field"><span>Which page</span>${seg('dial-set', 'main', d.main, [[true, 'Trailside <em>quick</em>'], [false, 'Workshop <em>slower</em>']], attrs)}</div>
-    <div class="field"><span>Turning this way increases it</span>${seg('dial-set', 'reverse', d.reverse, [[false, `${ICON.cw} Clockwise`], [true, `${ICON.ccw} Anticlockwise`]], attrs)}</div>
+    ${seg('dial-set', 'main', d.main, [[true, 'Trailside'], [false, 'Workshop']], attrs)}
+    ${seg('dial-set', 'tab', t, TYPE_TABS, attrs)}
+    <div class="three">${numField(i, 'min', 'Min', d.min)}${numField(i, 'max', 'Max', d.max)}${numField(i, 'value', 'Now', d.value)}</div>
+    <details class="options"><summary>Options</summary>${options}</details>
   </section>`;
 }
 
@@ -922,35 +893,35 @@ function viewSettings() {
   <main>
     ${installCard()}
     <section class="card">
-      <h3>Forks &amp; shocks</h3>
       ${state.components.map((c) => `<a class="list-item" href="#/component/${c.id}">
-        <span><b>${esc(c.name)}</b><small>${esc([kindLabel(c.kind), c.bike, plural(c.dials.length, 'dial')].filter(Boolean).join(' · '))}</small></span>${ICON.chevron}</a>`).join('')}
+        <span><b>${esc(c.name)}</b><small>${esc(kindLabel(c.kind))}</small></span>${ICON.chevron}</a>`).join('')}
       <div class="two">
         <a class="btn block" href="#/component/new?kind=fork">${ICON.plus} Fork</a>
         <a class="btn block" href="#/component/new?kind=shock">${ICON.plus} Shock</a>
       </div>
     </section>
-    <section class="card">
-      <h3>Quick launch (Galaxy)</h3>
-      <p class="muted">Double-press the side button to open SagBook:</p>
-      <p>Settings → Advanced features → Side button → <b>Double press</b> → turn on → <b>Open app</b> → <b>SagBook</b>.</p>
+    <section class="card share">
+      <img src="icons/qr.svg" alt="QR code to get SagBook" width="132" height="132">
+      <div>
+        <h3>Share SagBook</h3>
+        <p class="muted small">Friends scan this to install. Everyone gets updates automatically, and keeps their own data.</p>
+        <button type="button" class="btn" data-action="share">Share link</button>
+      </div>
     </section>
     <section class="card">
-      <h3>Appearance</h3>
       <div class="field"><span>Theme</span>${seg('setting', 'theme', s.theme, [['auto', 'Auto'], ['dark', 'Dark'], ['light', 'Light']])}</div>
     </section>
     <section class="card">
-      <h3>Backup</h3>
-      <p class="muted">Your data is stored only on this phone. Save a backup file now and then (e.g. to Google Drive) so a new phone can restore it.</p>
-      <p class="muted">Last backup: ${s.lastBackup ? esc(fmtDate(s.lastBackup)) : 'never'}</p>
-      <button type="button" class="btn block" data-action="export">Save backup file</button>
-      <label class="btn block">Restore from backup file<input type="file" accept=".json,application/json" data-action="import" hidden></label>
-      <p class="muted small" id="persist"></p>
+      <div class="two">
+        <button type="button" class="btn" data-action="export">Back up</button>
+        <label class="btn">Restore<input type="file" accept=".json,application/json" data-action="import" hidden></label>
+      </div>
+      <p class="muted small center">Last backup: ${s.lastBackup ? esc(fmtDate(s.lastBackup)) : 'never'}</p>
     </section>
     <section class="card">
-      <h3>About</h3>
-      <p class="muted">SagBook version ${esc(APP_VERSION)}</p>
+      <p class="muted small">Quick launch: Settings → Advanced features → Side button → Double press → Open app → SagBook</p>
       <button type="button" class="btn block" data-action="check-update">Check for updates</button>
+      <p class="muted small center">Version ${esc(APP_VERSION)}</p>
     </section>
   </main>`;
 }
@@ -1017,7 +988,7 @@ function render() {
   const main = !['component', 'history', 'entry', 'settings'].includes(view);
   $app.classList.toggle('main-view', main && state.components.length > 0);
   $app.innerHTML = html;
-  if (main) setupPager();
+  if (main) { setupPager(); fitDials(); }
   if (view === 'settings') showPersistStatus();
 }
 
@@ -1062,8 +1033,8 @@ document.addEventListener('click', async (ev) => {
     state.settings.selected[`${cid}:${activeSection(comp)}`] = did;
     const hero = $app.querySelector(`.page[data-comp="${cid}"] .hero`);
     hero.outerHTML = heroHtml(comp, comp.dials.find((d) => d.id === did));
+    fitDials();
     $app.querySelectorAll(`.page[data-comp="${cid}"] .tile`).forEach((t) => t.classList.toggle('sel', t.dataset.tile === el.dataset.tile));
-    $app.querySelector(`.page[data-comp="${cid}"]`).scrollTo({ top: 0, behavior: 'smooth' });
     buzz(5);
     saveSoon();
   } else if (action === 'section') {
@@ -1071,6 +1042,7 @@ document.addEventListener('click', async (ev) => {
     state.settings.section[cid] = sec;
     const page = $app.querySelector(`.page[data-comp="${cid}"]`);
     page.outerHTML = pageHtml(compById(cid));
+    fitDials();
     buzz(5);
     saveSoon();
   } else if (action === 'nudge') {
@@ -1099,12 +1071,8 @@ document.addEventListener('click', async (ev) => {
     delete state.pending[el.dataset.id];
     await save();
     rerenderKeepScroll();
-  } else if (action === 'open-save') {
-    openSaveSheet(compById(el.dataset.id));
-  } else if (action === 'toggle-tag') {
-    el.classList.toggle('on');
-  } else if (action === 'confirm-save') {
-    confirmSave(compById(el.dataset.id));
+  } else if (action === 'save-now') {
+    saveNow(compById(el.dataset.id));
   } else if (action === 'close-sheet') {
     closeSheet();
   } else if (action === 'entry-tag') {
@@ -1179,6 +1147,12 @@ document.addEventListener('click', async (ev) => {
     rerenderKeepScroll();
   } else if (action === 'export') {
     exportData();
+  } else if (action === 'share') {
+    const url = 'https://kieranburton30.github.io/sagbook/';
+    try {
+      if (navigator.share) await navigator.share({ title: 'SagBook', text: 'Suspension setup log', url });
+      else { await navigator.clipboard.writeText(url); toast('Link copied'); }
+    } catch { /* share cancelled */ }
   } else if (action === 'check-update') {
     checkForUpdate();
   } else if (action === 'install') {

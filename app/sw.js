@@ -1,7 +1,7 @@
 // SagBook service worker: caches the app for offline use and picks up new
 // versions. tools/update.ps1 rewrites VERSION on every publish, which is what
 // makes phones notice an update.
-const VERSION = '2026.10.07-0054';
+const VERSION = '2026.10.07-0102';
 const CACHE = 'sagbook-' + VERSION;
 const FILES = [
   './',
