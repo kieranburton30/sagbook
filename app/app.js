@@ -1,6 +1,6 @@
 // SagBook: suspension dial log. Plain JS, no build step.
 // tools/update.ps1 rewrites APP_VERSION on every publish.
-const APP_VERSION = '2026.10.07-0102';
+const APP_VERSION = '2026.10.07-0111';
 const PSI_PER_BAR = 14.5038;
 
 const $app = document.getElementById('app');
@@ -83,11 +83,17 @@ function newDial(name, type, o = {}) {
     min: o.min ?? t.min, max: o.max ?? t.max, step: o.step ?? t.step,
     value: o.value ?? o.min ?? t.min,
     reverse: false,
+    control: defaultControl(type),
   });
 }
 function withMain(d) { d.main = defaultMain(d); return d; }
 const unitOf = (d) => (d.type === 'custom' ? d.unit || '' : TYPES[d.type].unit);
 const typeTab = (d) => (d.type === 'psi' || d.type === 'bar' ? 'pressure' : d.type);
+// Spacers and pressure feel more natural pushed up or down than turned.
+const defaultControl = (type) => (type === 'spacers' || type === 'psi' || type === 'bar' ? 'slider' : 'dial');
+const isSlider = (d) => d.control === 'slider';
+const stepTotal = (d) => Math.max(1, Math.round((d.max - d.min) / d.step));
+const sliderPct = (d, v) => (clamp(v, d.min, d.max) - d.min) / ((d.max - d.min) || 1);
 
 // Turns read best as fractions: 1¼, 2⅜ …
 const FRAC = { 0.25: '¼', 0.5: '½', 0.75: '¾', 0.125: '⅛', 0.375: '⅜', 0.625: '⅝', 0.875: '⅞' };
@@ -116,6 +122,9 @@ function geom(d) {
 const dirOf = (d) => (d.reverse ? -1 : 1);
 const angleFor = (d, v) => ((v - d.min) / d.step) * geom(d).deg * dirOf(d);
 const stepIndex = (d, v) => Math.round((v - d.min) / d.step);
+
+// Compression and rebound knobs look different, like on the real thing.
+const knobStyle = (d) => ({ red: 'k-reb', blue: 'k-comp', gold: 'k-pre' }[dialColor(d)] || 'k-reb');
 
 function dialColor(d) {
   const n = d.name.toLowerCase();
@@ -208,6 +217,7 @@ function migrate(s) {
   for (const c of s.components) {
     for (const dial of c.dials) {
       dial.reverse ??= false;
+      dial.control ??= defaultControl(dial.type);
       if (dial.main === undefined) {
         // Dials from before the main/more split: place them, and lift the old 300 psi cap.
         withMain(dial);
@@ -421,7 +431,7 @@ function effectOf(d) {
   if (/reb|lsr|hsr/.test(n)) return { up: 'slower', down: 'faster' };
   if (/comp|lsc|hsc|climb|lock|threshold|pedal/.test(n)) return { up: 'firmer', down: 'softer' };
   if (d?.type === 'psi' || d?.type === 'bar') return { up: 'firmer', down: 'softer' };
-  if (d?.type === 'spacers') return { up: 'more progressive', down: 'more linear' };
+  if (d?.type === 'spacers') return { up: 'progressive', down: 'linear' };
   return { up: 'more', down: 'less' };
 }
 const cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
@@ -443,6 +453,12 @@ function deltaHtml(d, v) {
 // The buttons under the knob say what each direction does and nudge one step.
 function dirRow(d) {
   const fx = effectOf(d);
+  if (isSlider(d)) {
+    return `<div class="dir-row">
+    <button type="button" class="dir" data-action="nudge" data-dir="-1">${ICON.down}<span>${esc(cap(fx.down))}</span></button>
+    <button type="button" class="dir" data-action="nudge" data-dir="1"><span>${esc(cap(fx.up))}</span>${ICON.up}</button>
+  </div>`;
+  }
   const less = { dir: -1, label: cap(fx.down) }, more = { dir: 1, label: cap(fx.up) };
   const [ccw, cw] = d.reverse ? [more, less] : [less, more];
   return `<div class="dir-row">
@@ -459,13 +475,44 @@ function heroHtml(comp, d) {
       <button type="button" class="value" data-action="type-value" aria-label="Type a value for ${esc(d.name)}">${readoutHtml(d, v)}</button>
       <div class="delta">${deltaHtml(d, v)}</div>
     </div>
-    <div class="dial-slot">
-      <div class="dial-big" role="slider" tabindex="0" aria-label="${esc(d.name)}" aria-valuemin="${d.min}" aria-valuemax="${d.max}" aria-valuenow="${v}">
-        ${ticksSvg(d, v)}
-        <div class="knob c-${dialColor(d)}" style="--rot:${angleFor(d, v).toFixed(2)}deg"><span class="notch"></span></div>
-      </div>
-    </div>
+    <div class="dial-slot">${isSlider(d) ? sliderHtml(d, v) : dialHtml(d, v)}</div>
     ${dirRow(d)}
+  </div>`;
+}
+
+function dialHtml(d, v) {
+  return `<div class="dial-big" role="slider" tabindex="0" aria-label="${esc(d.name)}" aria-valuemin="${d.min}" aria-valuemax="${d.max}" aria-valuenow="${v}">
+    ${ticksSvg(d, v)}
+    <div class="knob-wrap"><div class="knob ${knobStyle(d)} c-${dialColor(d)}" style="--rot:${angleFor(d, v).toFixed(2)}deg"><span class="notch"></span></div></div>
+  </div>`;
+}
+
+const WAVE = 'M0 10 Q50 0 100 10 T200 10 T300 10 T400 10 V20 H0 Z';
+const BUBBLES = [[18, 0, 7, 3.4], [38, 1.2, 5, 2.8], [55, 0.5, 9, 3.8], [70, 2, 6, 3], [82, 0.9, 4, 2.6], [28, 2.6, 6, 3.2], [62, 1.7, 5, 2.9]];
+
+// Sliders: spacers stack up inside an air can; pressure fills a tank.
+function sliderHtml(d, v) {
+  const aria = `role="slider" tabindex="0" aria-orientation="vertical" aria-label="${esc(d.name)}" aria-valuemin="${d.min}" aria-valuemax="${d.max}" aria-valuenow="${v}"`;
+  if (d.type === 'spacers') {
+    const on = stepIndex(d, v);
+    return `<div class="slider-ctl stack c-${dialColor(d)}" ${aria} style="--n:${stepTotal(d)}">
+      <div class="can">
+        <div class="can-cap"></div>
+        <div class="tokens">${Array.from({ length: stepTotal(d) }, (_, i) => `<i class="token ${i < on ? 'on' : ''}"></i>`).join('')}</div>
+        <div class="air"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      </div>
+    </div>`;
+  }
+  return `<div class="slider-ctl tank" ${aria} style="--pct:${sliderPct(d, v).toFixed(3)}">
+    <div class="tank-body">
+      <div class="fill">
+        <svg class="wave back" viewBox="0 0 400 20" preserveAspectRatio="none" aria-hidden="true"><path d="${WAVE}"/></svg>
+        <svg class="wave" viewBox="0 0 400 20" preserveAspectRatio="none" aria-hidden="true"><path d="${WAVE}"/></svg>
+        <div class="bubbles">${BUBBLES.map(([x, delay, size, t]) => `<span style="--x:${x}%;--d:${delay}s;--s:${size}px;--t:${t}s"></span>`).join('')}</div>
+      </div>
+      <div class="gauge-lines"></div>
+      <div class="gloss"></div>
+    </div>
   </div>`;
 }
 
@@ -492,10 +539,16 @@ function refreshDial(comp, d, residual = 0) {
     hero.classList.toggle('changed', v !== d.value);
     hero.querySelector('.value').innerHTML = readoutHtml(d, v);
     hero.querySelector('.delta').innerHTML = deltaHtml(d, v);
-    hero.querySelector('.knob').style.setProperty('--rot', `${(angleFor(d, v) + residual).toFixed(2)}deg`);
-    hero.querySelector('.dial-big').setAttribute('aria-valuenow', v);
     const idx = stepIndex(d, v);
-    hero.querySelectorAll('.tk[data-i]').forEach((t) => t.classList.toggle('on', +t.dataset.i <= idx));
+    const ctl = hero.querySelector('.slider-ctl, .dial-big');
+    ctl.setAttribute('aria-valuenow', v);
+    if (isSlider(d)) {
+      ctl.style.setProperty('--pct', sliderPct(d, v).toFixed(3));
+      ctl.querySelectorAll('.token').forEach((t, i) => t.classList.toggle('on', i < idx));
+    } else {
+      hero.querySelector('.knob').style.setProperty('--rot', `${(angleFor(d, v) + residual).toFixed(2)}deg`);
+      hero.querySelectorAll('.tk[data-i]').forEach((t) => t.classList.toggle('on', +t.dataset.i <= idx));
+    }
   }
   const tile = $app.querySelector(`[data-tile="${comp.id}|${d.id}"]`);
   if (tile) {
@@ -562,6 +615,18 @@ let drag = null;
 const angleAt = (e) => Math.atan2(e.clientY - drag.cy, e.clientX - drag.cx) * 180 / Math.PI;
 
 document.addEventListener('pointerdown', (e) => {
+  const lin = e.target.closest('.slider-ctl');
+  if (lin) {
+    const [comp, d] = heroTarget(lin);
+    const h = lin.getBoundingClientRect().height;
+    // Spacers click in one at a time; pressure moves a step every few pixels.
+    const per = d.type === 'spacers' ? clamp((h * 0.8) / stepTotal(d), 22, 70) : clamp(h / stepTotal(d), 3, 40);
+    drag = { linear: true, comp, d, lastY: e.clientY, acc: 0, per, id: e.pointerId, dial: lin, limitHit: false };
+    try { lin.setPointerCapture(e.pointerId); } catch { /* pointer already gone */ }
+    lin.classList.add('dragging');
+    e.preventDefault();
+    return;
+  }
   const dial = e.target.closest('.dial-big');
   if (!dial) return;
   const [comp, d] = heroTarget(dial);
@@ -575,6 +640,23 @@ document.addEventListener('pointerdown', (e) => {
 
 document.addEventListener('pointermove', (e) => {
   if (!drag || e.pointerId !== drag.id) return;
+  if (drag.linear) {
+    const { comp, d } = drag;
+    drag.acc += drag.lastY - e.clientY; // up = more
+    drag.lastY = e.clientY;
+    while (Math.abs(drag.acc) >= drag.per) {
+      const dir = Math.sign(drag.acc);
+      if (!stepDial(comp, d, dir)) {
+        if (!drag.limitHit) { buzz(40); drag.limitHit = true; }
+        drag.acc = 0;
+        break;
+      }
+      drag.limitHit = false;
+      drag.acc -= dir * drag.per;
+    }
+    refreshDial(comp, d);
+    return;
+  }
   if (Math.hypot(e.clientX - drag.cx, e.clientY - drag.cy) < 14) return; // too near the centre to read an angle
   const a = angleAt(e);
   let delta = a - drag.last;
@@ -611,7 +693,7 @@ document.addEventListener('pointercancel', endDrag);
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') { closeSheet(); return; }
-  const dial = e.target.closest?.('.dial-big');
+  const dial = e.target.closest?.('.dial-big, .slider-ctl');
   if (!dial) return;
   const dir = { ArrowUp: 1, ArrowRight: 1, ArrowDown: -1, ArrowLeft: -1 }[e.key];
   if (!dir) return;
@@ -815,7 +897,8 @@ function dialEditor(d, i) {
   if (t === 'custom') {
     options += `<div class="two"><label class="field"><span>Unit</span><input data-bind="dials.${i}.unit" value="${esc(d.unit)}" placeholder="%, mm…" autocomplete="off"></label>${numField(i, 'step', 'Step', d.step)}</div>`;
   }
-  options += `<div class="field"><span>Clockwise</span>${seg('dial-set', 'reverse', d.reverse, [[false, 'Increases'], [true, 'Decreases']], attrs)}</div>`;
+  options += `<div class="field"><span>Control</span>${seg('dial-set', 'control', d.control, [['dial', 'Dial'], ['slider', 'Slider']], attrs)}</div>`;
+  if (!isSlider(d)) options += `<div class="field"><span>Clockwise</span>${seg('dial-set', 'reverse', d.reverse, [[false, 'Increases'], [true, 'Decreases']], attrs)}</div>`;
   return `<section class="card dial-edit">
     <div class="dial-edit-head">
       <i class="sw big c-${dialColor(d)}"></i>
@@ -838,7 +921,7 @@ function setPath(obj, path, value) {
 
 function setDialType(d, type) {
   const def = TYPES[type];
-  Object.assign(d, { type, min: def.min, max: def.max, step: def.step });
+  Object.assign(d, { type, min: def.min, max: def.max, step: def.step, control: defaultControl(type) });
   d.value = clamp(d.value ?? def.min, def.min, def.max);
   if (type === 'psi' || type === 'bar') {
     // Start near a typical pressure rather than the bottom of a 0–600 psi range.
@@ -1107,6 +1190,7 @@ document.addEventListener('click', async (ev) => {
     else if (key === 'type') setDialType(d, value);
     else if (key === 'step') d.step = +value;
     else if (key === 'reverse') d.reverse = value === 'true';
+    else if (key === 'control') d.control = value;
     else if (key === 'main') d.main = value === 'true';
     dirty = true;
     rerenderKeepScroll();
