@@ -1,6 +1,6 @@
 // SagBook: suspension dial log. Plain JS, no build step.
 // tools/update.ps1 rewrites APP_VERSION on every publish.
-const APP_VERSION = '2026.10.07-0045';
+const APP_VERSION = '2026.10.07-0054';
 const PSI_PER_BAR = 14.5038;
 
 const $app = document.getElementById('app');
@@ -57,8 +57,8 @@ const buzz = (ms) => { try { navigator.vibrate?.(ms); } catch { /* unsupported *
 const TYPES = {
   clicks: { label: 'Clicks', unit: 'clicks', step: 1, min: 0, max: 16 },
   turns: { label: 'Turns', unit: 'turns', step: 0.25, min: 0, max: 4 },
-  psi: { label: 'Pressure', unit: 'psi', step: 1, min: 50, max: 300 },
-  bar: { label: 'Pressure', unit: 'bar', step: 0.1, min: 3, max: 20 },
+  psi: { label: 'Pressure', unit: 'psi', step: 1, min: 0, max: 600 },
+  bar: { label: 'Pressure', unit: 'bar', step: 0.1, min: 0, max: 40 },
   spacers: { label: 'Spacers', unit: 'spacers', step: 1, min: 0, max: 6 },
   custom: { label: 'Other', unit: '', step: 1, min: 0, max: 100 },
 };
@@ -70,16 +70,21 @@ const PRESETS = [
 ];
 const TAGS = ['Dialled', 'Too harsh', 'Too soft', 'Bottoming out', 'Packing down', 'Kicking back', 'Wallowy', 'Lacks grip'];
 
+// Damping adjusters get changed trailside, so they start on the Trailside page;
+// pressure, spacers, preload and sag start on the Workshop page.
+const defaultMain = (d) => d.type === 'clicks' || /reb|comp|lsc|hsc|lsr|hsr|lock|climb|threshold/i.test(d.name);
+
 function newDial(name, type, o = {}) {
   const t = TYPES[type];
-  return {
+  return withMain({
     id: uid(), name, type,
     unit: o.unit ?? '',
     min: o.min ?? t.min, max: o.max ?? t.max, step: o.step ?? t.step,
     value: o.value ?? o.min ?? t.min,
     reverse: false,
-  };
+  });
 }
+function withMain(d) { d.main = defaultMain(d); return d; }
 const unitOf = (d) => (d.type === 'custom' ? d.unit || '' : TYPES[d.type].unit);
 const typeTab = (d) => (d.type === 'psi' || d.type === 'bar' ? 'pressure' : d.type);
 
@@ -145,7 +150,7 @@ async function idb(mode, fn) {
 function defaultState() {
   return {
     schema: 2,
-    settings: { theme: 'auto', lastPage: null, lastBackup: null, selected: {} },
+    settings: { theme: 'auto', lastPage: null, lastBackup: null, selected: {}, section: {} },
     components: [],
     entries: [],
     pending: {},
@@ -194,10 +199,22 @@ function migrate(s) {
   const d = defaultState();
   s.settings = { ...d.settings, ...s.settings };
   s.settings.selected ||= {};
+  s.settings.section ||= {};
+  delete s.settings.moreOpen;
   s.components ||= [];
   s.entries ||= [];
   s.pending ||= {};
-  for (const c of s.components) for (const dial of c.dials) dial.reverse ??= false;
+  for (const c of s.components) {
+    for (const dial of c.dials) {
+      dial.reverse ??= false;
+      if (dial.main === undefined) {
+        // Dials from before the main/more split: place them, and lift the old 300 psi cap.
+        withMain(dial);
+        if (dial.type === 'psi' && dial.max === 300) dial.max = 600;
+        if (dial.type === 'bar' && dial.max === 20) dial.max = 40;
+      }
+    }
+  }
   for (const e of s.entries) e.tags ||= [];
   return s;
 }
@@ -228,7 +245,21 @@ const current = (comp, d) => state.pending[comp.id]?.[d.id] ?? d.value;
 const pendingDials = (comp) => comp.dials.filter((d) => current(comp, d) !== d.value);
 const KINDS = [['fork', 'Fork'], ['shock', 'Shock'], ['other', 'Other']];
 const kindLabel = (k) => KINDS.find(([v]) => v === k)?.[1] || 'Other';
-const selectedDial = (comp) => comp.dials.find((d) => d.id === state.settings.selected[comp.id]) || comp.dials[0];
+const SECTIONS = [
+  ['main', 'Trailside', 'Quick changes on the trail'],
+  ['more', 'Workshop', 'Pressure, spacers and slower jobs'],
+];
+const dialsIn = (comp, sec) => comp.dials.filter((d) => (sec === 'main') === !!d.main);
+function activeSection(comp) {
+  const want = state.settings.section[comp.id] || 'main';
+  if (dialsIn(comp, want).length) return want;
+  return want === 'main' ? 'more' : 'main';
+}
+function selectedDial(comp) {
+  const sec = activeSection(comp);
+  const list = dialsIn(comp, sec);
+  return list.find((d) => d.id === state.settings.selected[`${comp.id}:${sec}`]) || list[0];
+}
 
 function setPending(comp, d, v) {
   const p = (state.pending[comp.id] ||= {});
@@ -337,8 +368,8 @@ function pageHtml(comp) {
       <a class="pill-btn" href="#/history/${comp.id}">${ICON.clock}<span>${count}</span></a>
       <a class="pill-btn" href="#/component/${comp.id}" aria-label="Set up dials">${ICON.sliders}</a>
     </div>
-    ${sel ? `${heroHtml(comp, sel)}
-      <div class="tiles">${comp.dials.map((d) => tileHtml(comp, d, d === sel)).join('')}</div>`
+    ${sel ? `${sectionTabs(comp)}${heroHtml(comp, sel)}
+      <div class="tiles">${dialsIn(comp, activeSection(comp)).map((d) => tileHtml(comp, d, d === sel)).join('')}</div>`
       : `<div class="no-dials"><p class="muted">No dials set up yet.</p><a class="btn primary" href="#/component/${comp.id}">Add dials</a></div>`}
     ${saveBar(comp)}
   </section>`;
@@ -372,11 +403,42 @@ function readoutHtml(d, v) {
   return `<b>${fmt(d, v)}</b><span>${showMax ? `/ ${fmt(d, d.max)} ` : ''}${esc(unitOf(d))}</span>`;
 }
 
+// What turning a dial up or down actually does to the ride. Counting starts
+// fully open, so a higher number always means more damping.
+function effectOf(d) {
+  const n = (d?.name || '').toLowerCase();
+  if (/reb|lsr|hsr/.test(n)) return { up: 'slower', down: 'faster', upLong: 'more rebound damping', downLong: 'less rebound damping' };
+  if (/comp|lsc|hsc|climb|lock|threshold|pedal/.test(n)) return { up: 'firmer', down: 'softer', upLong: 'more compression', downLong: 'less compression' };
+  if (d?.type === 'psi' || d?.type === 'bar') return { up: 'firmer', down: 'softer', upLong: 'more air', downLong: 'less air' };
+  if (d?.type === 'spacers') return { up: 'more ramp-up', down: 'less ramp-up', upLong: 'more progressive', downLong: 'more linear' };
+  if (/pre ?load/.test(n)) return { up: 'more preload', down: 'less preload', upLong: 'more preload', downLong: 'less preload' };
+  return { up: 'up', down: 'down', upLong: 'increase', downLong: 'decrease' };
+}
+const cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+
+// "+2 slower", "−¼ less preload"
+function effectText(d, from, to) {
+  if (from == null || to == null || from === to) return '';
+  const fx = effectOf(d);
+  const diff = to - from;
+  const amount = d ? fmt(d, Math.abs(diff)) : trim(Math.abs(diff));
+  return `${diff > 0 ? '+' : '−'}${amount} ${diff > 0 ? fx.up : fx.down}`;
+}
+
 function deltaHtml(d, v) {
   if (v !== d.value) {
-    return `<span class="was">was ${fmt(d, d.value)}</span><button type="button" class="reset" data-action="reset-dial">${ICON.undo} Reset</button>`;
+    return `<span class="was">was ${fmt(d, d.value)} · <b>${esc(effectText(d, d.value, v))}</b></span><button type="button" class="reset" data-action="reset-dial">${ICON.undo} Reset</button>`;
   }
-  return `<span class="hint">${d.reverse ? ICON.ccw : ICON.cw} Spin ${d.reverse ? 'anticlockwise' : 'clockwise'} to increase</span>`;
+  return '<span class="hint">Spin to adjust · tap the number to type it</span>';
+}
+
+// Labels either side of the knob so it's obvious which way does what.
+function dirLabels(d) {
+  const fx = effectOf(d);
+  const more = `<b>${esc(cap(fx.up))}</b><small>${esc(fx.upLong)}</small>`;
+  const less = `<b>${esc(cap(fx.down))}</b><small>${esc(fx.downLong)}</small>`;
+  const [ccw, cw] = d.reverse ? [more, less] : [less, more];
+  return `<div class="dir-labels"><span class="ccw">${ICON.ccw}<span>${ccw}</span></span><span class="cw"><span>${cw}</span>${ICON.cw}</span></div>`;
 }
 
 function heroHtml(comp, d) {
@@ -395,6 +457,7 @@ function heroHtml(comp, d) {
       ${ticksSvg(d, v)}
       <div class="knob c-${dialColor(d)}" style="--rot:${angleFor(d, v).toFixed(2)}deg"><span class="notch"></span></div>
     </div>
+    ${dirLabels(d)}
     ${g.ring ? '' : `<div class="range"><span>${fmt(d, d.min)}</span><div class="bar"><i style="width:${(pct * 100).toFixed(1)}%"></i></div><span>${fmt(d, d.max)}</span></div>`}
   </div>`;
 }
@@ -407,6 +470,17 @@ function tileHtml(comp, d, selected) {
     <span class="t-val">${fmt(d, v)}<small>${['clicks', 'turns', 'spacers'].includes(d.type) ? `/${fmt(d, d.max)}` : ` ${esc(unitOf(d))}`}</small></span>
     <span class="t-bar"><i style="width:${(pct * 100).toFixed(1)}%"></i></span>
   </button>`;
+}
+
+function sectionTabs(comp) {
+  const active = activeSection(comp);
+  const avail = SECTIONS.filter(([sec]) => dialsIn(comp, sec).length);
+  if (avail.length < 2) return '';
+  return `<div class="sections">${avail.map(([sec, label, blurb]) => {
+    const changed = dialsIn(comp, sec).some((d) => current(comp, d) !== d.value);
+    return `<button type="button" class="section-btn ${sec === active ? 'on' : ''}" data-action="section" data-sec-btn="${comp.id}|${sec}">
+      <b>${label}${changed ? '<i class="dot"></i>' : ''}</b><small>${blurb}</small></button>`;
+  }).join('')}</div>`;
 }
 
 function saveBar(comp) {
@@ -445,6 +519,14 @@ function refreshSaveBar(comp) {
   if (bar) {
     bar.classList.toggle('show', n > 0);
     bar.querySelector('.count').textContent = plural(n, 'change');
+  }
+  for (const [sec] of SECTIONS) {
+    const btn = $app.querySelector(`[data-sec-btn="${comp.id}|${sec}"] b`);
+    if (!btn) continue;
+    const changed = dialsIn(comp, sec).some((d) => current(comp, d) !== d.value);
+    const dot = btn.querySelector('.dot');
+    if (changed && !dot) btn.insertAdjacentHTML('beforeend', '<i class="dot"></i>');
+    if (!changed && dot) dot.remove();
   }
   const tab = $app.querySelectorAll('.tab')[state.components.indexOf(comp)];
   if (tab) {
@@ -589,7 +671,7 @@ function openSaveSheet(comp) {
   if (!changed.length) return;
   openSheet(`<h3>Save ${plural(changed.length, 'change')}</h3>
     <p class="muted sheet-sub">${esc(comp.name)}</p>
-    <ul class="change-list">${changed.map((d) => `<li><span>${esc(d.name)}</span><span>${fmt(d, d.value)} → <b>${fmt(d, current(comp, d))}</b> <small>${esc(unitOf(d))}</small></span></li>`).join('')}</ul>
+    <ul class="change-list">${changed.map((d) => `<li><span>${esc(d.name)}</span><span>${fmt(d, d.value)} → <b>${fmt(d, current(comp, d))}</b> <small>${esc(unitOf(d))} · ${esc(effectText(d, d.value, current(comp, d)))}</small></span></li>`).join('')}</ul>
     <div class="field"><span>How did it feel? <em class="muted">(optional)</em></span>
       <div class="tag-row">${TAGS.map((t) => `<button type="button" class="tag" data-action="toggle-tag">${esc(t)}</button>`).join('')}</div></div>
     <label class="field"><span>Note <em class="muted">(optional)</em></span>
@@ -640,7 +722,7 @@ function changeChips(e, comp) {
   return e.changes.map((c) => {
     const d = comp?.dials.find((x) => x.id === c.dialId);
     const up = c.to > c.from;
-    return `<span class="chip-ch"><span>${esc(d?.name || c.name)}</span> ${fmtChange(d, c.from)} <i class="${up ? 'up' : 'down'}">→</i> <b>${fmtChange(d, c.to)}</b></span>`;
+    return `<span class="chip-ch"><span>${esc(d?.name || c.name)}</span> ${fmtChange(d, c.from)} <i class="${up ? 'up' : 'down'}">→</i> <b>${fmtChange(d, c.to)}</b><em>${esc(effectText(d || { name: c.name }, c.from, c.to).replace(/^[+−]\S+ /, ''))}</em></span>`;
   }).join('');
 }
 
@@ -752,7 +834,8 @@ function dialEditor(d, i) {
       <div class="field"><span>Snaps every</span>${seg('dial-set', 'step', d.step, [[0.25, '¼ turn'], [0.125, '⅛ turn'], [0.0625, '1/16 turn']], attrs)}</div>`;
   } else if (t === 'pressure') {
     fields = `<div class="field"><span>Unit</span>${seg('dial-set', 'type', d.type, [['psi', 'psi'], ['bar', 'bar']], attrs)}</div>
-      <div class="three">${numField(i, 'min', 'Min', d.min)}${numField(i, 'max', 'Max', d.max)}${numField(i, 'value', 'Current', d.value)}</div>`;
+      <div class="three">${numField(i, 'min', 'Min', d.min)}${numField(i, 'max', 'Max', d.max)}${numField(i, 'value', 'Current', d.value)}</div>
+      <p class="muted small">Set min and max to this ${draft.kind === 'shock' ? 'shock' : draft.kind === 'fork' ? 'fork' : 'unit'}'s range (up to whatever it's rated for).</p>`;
   } else if (t === 'spacers') {
     fields = `<div class="three">${numField(i, 'min', 'Min', d.min)}${numField(i, 'max', 'Max', d.max)}${numField(i, 'value', 'Current', d.value)}</div>`;
   } else {
@@ -770,6 +853,7 @@ function dialEditor(d, i) {
     </div>
     <div class="field"><span>Measured in</span>${seg('dial-set', 'tab', t, TYPE_TABS, attrs)}</div>
     ${fields}
+    <div class="field"><span>Which page</span>${seg('dial-set', 'main', d.main, [[true, 'Trailside <em>quick</em>'], [false, 'Workshop <em>slower</em>']], attrs)}</div>
     <div class="field"><span>Turning this way increases it</span>${seg('dial-set', 'reverse', d.reverse, [[false, `${ICON.cw} Clockwise`], [true, `${ICON.ccw} Anticlockwise`]], attrs)}</div>
   </section>`;
 }
@@ -785,7 +869,11 @@ function setDialType(d, type) {
   const def = TYPES[type];
   Object.assign(d, { type, min: def.min, max: def.max, step: def.step });
   d.value = clamp(d.value ?? def.min, def.min, def.max);
-  if (type === 'psi' || type === 'bar') d.value = Math.round((def.min + def.max) / 2 / def.step) * def.step;
+  if (type === 'psi' || type === 'bar') {
+    // Start near a typical pressure rather than the bottom of a 0–600 psi range.
+    const psi = draft?.kind === 'shock' ? 180 : 80;
+    d.value = type === 'bar' ? +(psi / PSI_PER_BAR).toFixed(1) : psi;
+  }
 }
 
 async function saveComponent() {
@@ -970,11 +1058,19 @@ document.addEventListener('click', async (ev) => {
     pager.scrollTo({ left: +el.dataset.index * pager.clientWidth, behavior: 'smooth' });
   } else if (action === 'select-dial') {
     const [cid, did] = el.dataset.tile.split('|');
-    state.settings.selected[cid] = did;
     const comp = compById(cid);
+    state.settings.selected[`${cid}:${activeSection(comp)}`] = did;
     const hero = $app.querySelector(`.page[data-comp="${cid}"] .hero`);
     hero.outerHTML = heroHtml(comp, comp.dials.find((d) => d.id === did));
     $app.querySelectorAll(`.page[data-comp="${cid}"] .tile`).forEach((t) => t.classList.toggle('sel', t.dataset.tile === el.dataset.tile));
+    $app.querySelector(`.page[data-comp="${cid}"]`).scrollTo({ top: 0, behavior: 'smooth' });
+    buzz(5);
+    saveSoon();
+  } else if (action === 'section') {
+    const [cid, sec] = el.dataset.secBtn.split('|');
+    state.settings.section[cid] = sec;
+    const page = $app.querySelector(`.page[data-comp="${cid}"]`);
+    page.outerHTML = pageHtml(compById(cid));
     buzz(5);
     saveSoon();
   } else if (action === 'nudge') {
@@ -1043,6 +1139,7 @@ document.addEventListener('click', async (ev) => {
     else if (key === 'type') setDialType(d, value);
     else if (key === 'step') d.step = +value;
     else if (key === 'reverse') d.reverse = value === 'true';
+    else if (key === 'main') d.main = value === 'true';
     dirty = true;
     rerenderKeepScroll();
   } else if (action === 'add-dial') {

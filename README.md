@@ -5,9 +5,14 @@ fork and shock gets its own swipeable page of dials (rebound, compression, air
 pressure, spacers, preload…). Spin a dial as you change it on the bike, then
 tap Save to log the change.
 
+Each page has two halves: **Trailside** (compression, rebound: quick
+on-the-fly changes) and **Workshop** (pressure, volume spacers, preload:
+slower jobs). Clockwise always means more damping (firmer compression,
+slower rebound); anticlockwise means less.
+
 Set up profiles under **Settings → Forks & shocks**: for each dial choose
-clicks, turns, pressure, spacers or a custom unit, plus its min, max and
-current position.
+clicks, turns, pressure, spacers or a custom unit, its min, max and current
+position, and whether it lives on the Trailside or Workshop page.
 
 **Live app:** https://kieranburton30.github.io/sagbook/
 

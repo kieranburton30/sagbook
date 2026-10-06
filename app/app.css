@@ -225,6 +225,14 @@ svg { flex: none; }
   border-radius: 4px; background: var(--cap-hi); box-shadow: 0 0 0 1.5px rgba(0, 0, 0, 0.35), 0 0 10px var(--cap);
 }
 
+.dir-labels { display: flex; justify-content: space-between; gap: 12px; width: min(86vw, 340px); margin: -4px 0 6px; font-size: 12px; color: var(--muted); }
+.dir-labels > span { display: flex; align-items: center; gap: 6px; }
+.dir-labels > span > span { display: flex; flex-direction: column; line-height: 1.2; }
+.dir-labels .cw { text-align: right; }
+.dir-labels b { font-size: 14px; color: var(--text); font-weight: 800; }
+.dir-labels svg { width: 20px; height: 20px; color: var(--muted); }
+.delta .was b { font-weight: 800; }
+.chip-ch em { font-style: normal; font-size: 12px; color: var(--muted); margin-left: 4px; }
 .range { display: flex; align-items: center; gap: 10px; width: min(76vw, 300px); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; margin-bottom: 4px; }
 .range .bar { flex: 1; height: 6px; border-radius: 3px; background: var(--field); overflow: hidden; }
 .range .bar i { display: block; height: 100%; background: var(--accent); border-radius: 3px; transition: width 0.1s; }
@@ -249,6 +257,19 @@ svg { flex: none; }
 .tile.changed .t-bar i { background: var(--accent); }
 .sw { display: inline-block; flex: none; width: 9px; height: 9px; border-radius: 50%; background: radial-gradient(circle at 35% 30%, var(--cap-hi), var(--cap)); }
 .sw.big { width: 16px; height: 16px; margin: 0 4px 0 2px; }
+
+/* trailside / workshop switch */
+.sections { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; margin: 6px 0 4px; border-radius: 14px; background: var(--field); border: 1px solid var(--line); }
+.section-btn {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 1px; text-align: left; min-width: 0;
+  padding: 7px 12px; border: 0; border-radius: 11px; background: transparent; cursor: pointer; color: var(--muted);
+}
+.section-btn b { display: inline-flex; align-items: center; gap: 6px; font-size: 15px; font-weight: 800; }
+.section-btn small { font-size: 11px; max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.section-btn.on { background: var(--card); color: var(--text); box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25); }
+.section-btn.on small { color: var(--muted); }
+.section-btn .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.seg button em { font-style: normal; font-weight: 500; font-size: 12px; opacity: 0.7; }
 
 .no-dials { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; }
 
