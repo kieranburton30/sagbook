@@ -1,6 +1,6 @@
 // SagBook: suspension dial log. Plain JS, no build step.
 // tools/update.ps1 rewrites APP_VERSION on every publish.
-const APP_VERSION = '2026.10.07-0115';
+const APP_VERSION = '2026.10.07-1100';
 const PSI_PER_BAR = 14.5038;
 
 const $app = document.getElementById('app');
@@ -860,49 +860,126 @@ function startDraft(id, params) {
 }
 
 function viewComponent() {
-  const used = new Set(draft.dials.map((d) => d.name));
-  return `${header(draft._new ? `New ${kindLabel(draft.kind).toLowerCase()}` : esc(draft.name || 'Setup'), backBtn())}
+  return `${header(draft._new ? `New ${kindLabel(draft.kind).toLowerCase()}` : 'Set up', backBtn())}
   <main class="form">
     <section class="card">
       <input class="name-input" data-bind="name" value="${esc(draft.name)}" placeholder="${draft.kind === 'shock' ? 'Shock name, e.g. Float X2' : 'Fork name, e.g. Lyrik'}" autocomplete="off" aria-label="Name">
       ${seg('draft-set', 'kind', draft.kind, KINDS)}
     </section>
-    ${draft.dials.map((d, i) => dialEditor(d, i)).join('')}
-    <div class="chips wrap">
-      ${PRESETS.map(([n], i) => (used.has(n) ? '' : `<button type="button" class="chip" data-action="add-dial" data-preset="${i}">+ ${esc(n)}</button>`)).join('')}
-      <button type="button" class="chip" data-action="add-dial" data-preset="-1">+ Other</button>
-    </div>
+    ${draft.dials.length ? `<ul class="dial-list">${draft.dials.map((d, i) => `<li><button type="button" class="dial-row" data-action="edit-dial" data-index="${i}">
+      <i class="sw big c-${dialColor(d)}"></i>
+      <span class="dr-main"><b>${esc(d.name || 'Unnamed dial')}</b><small>${esc(dialSummary(d))}</small></span>
+      <span class="dr-now">${fmt(d, d.value)}</span>${ICON.chevron}
+    </button></li>`).join('')}</ul>` : ''}
+    <button type="button" class="btn block add-dial" data-action="pick-preset">${ICON.plus} Add dial</button>
     ${draft._new ? '' : '<button type="button" class="btn danger block" data-action="delete-component">Delete</button>'}
-  </main>
-  <div class="dock"><button type="button" class="btn primary big block" data-action="save-component">Save</button></div>`;
+  </main>`;
 }
 
-function numField(i, key, label, value, dp = 3) {
-  return `<label class="field"><span>${label}</span><input inputmode="decimal" data-bind="dials.${i}.${key}" data-type="num" value="${esc(trim(value, dp))}"></label>`;
+function dialSummary(d) {
+  const t = typeTab(d);
+  const range = `${fmt(d, d.min)}–${fmt(d, d.max)}${t === 'clicks' || t === 'spacers' ? '' : ` ${unitOf(d)}`}`;
+  return `${TYPE_TABS.find(([k]) => k === t)[1]} ${range} · ${d.main ? 'Trailside' : 'Workshop'}`;
 }
 
-function dialEditor(d, i) {
+function openPresetSheet() {
+  const used = new Set(draft.dials.map((d) => d.name));
+  openSheet(`<h3>Add a dial</h3>
+    <div class="preset-grid">
+      ${PRESETS.map(([n, type], i) => (used.has(n) ? '' : `<button type="button" class="preset" data-action="add-dial" data-preset="${i}">
+        <i class="sw big c-${dialColor({ name: n, type })}"></i><span>${esc(n)}</span></button>`)).join('')}
+      <button type="button" class="preset" data-action="add-dial" data-preset="-1">${ICON.plus}<span>Other</span></button>
+    </div>`);
+}
+
+function stepperRow(i, key, label, value) {
+  return `<div class="stepper">
+    <span>${label}</span>
+    <div class="stepper-ctl">
+      <button type="button" data-action="nudge-field" data-index="${i}" data-key="${key}" data-dir="-1" aria-label="Decrease ${label}">−</button>
+      <input inputmode="decimal" data-bind="dials.${i}.${key}" data-type="num" value="${esc(trim(value, 3))}" aria-label="${label}">
+      <button type="button" data-action="nudge-field" data-index="${i}" data-key="${key}" data-dir="1" aria-label="Increase ${label}">+</button>
+    </div>
+  </div>`;
+}
+
+function dialSheetHtml(i) {
+  const d = draft.dials[i];
   const t = typeTab(d);
   const attrs = `data-index="${i}"`;
-  let options = '';
-  if (t === 'pressure') options += `<div class="field"><span>Unit</span>${seg('dial-set', 'type', d.type, [['psi', 'psi'], ['bar', 'bar']], attrs)}</div>`;
-  if (t === 'turns') options += `<div class="field"><span>Snap</span>${seg('dial-set', 'step', d.step, [[0.25, '¼'], [0.125, '⅛'], [0.0625, '1/16']], attrs)}</div>`;
-  if (t === 'custom') {
-    options += `<div class="two"><label class="field"><span>Unit</span><input data-bind="dials.${i}.unit" value="${esc(d.unit)}" placeholder="%, mm…" autocomplete="off"></label>${numField(i, 'step', 'Step', d.step)}</div>`;
-  }
-  options += `<div class="field"><span>Control</span>${seg('dial-set', 'control', d.control, [['dial', 'Dial'], ['slider', 'Slider']], attrs)}</div>`;
-  if (!isSlider(d)) options += `<div class="field"><span>Clockwise</span>${seg('dial-set', 'reverse', d.reverse, [[false, 'Increases'], [true, 'Decreases']], attrs)}</div>`;
-  return `<section class="card dial-edit">
-    <div class="dial-edit-head">
-      <i class="sw big c-${dialColor(d)}"></i>
-      <input data-bind="dials.${i}.name" value="${esc(d.name)}" placeholder="Dial name" autocomplete="off" aria-label="Dial name">
-      <button type="button" class="icon-btn subtle" data-action="del-dial" data-index="${i}" aria-label="Remove ${esc(d.name)}">${ICON.x}</button>
-    </div>
+  return `<div class="dial-sheet" data-dial-sheet="${i}">
+    <div class="ds-head"><i class="sw big c-${dialColor(d)}"></i>
+      <input class="name-input" data-bind="dials.${i}.name" value="${esc(d.name)}" placeholder="Dial name" autocomplete="off" aria-label="Dial name"></div>
     ${seg('dial-set', 'main', d.main, [[true, 'Trailside'], [false, 'Workshop']], attrs)}
-    ${seg('dial-set', 'tab', t, TYPE_TABS, attrs)}
-    <div class="three">${numField(i, 'min', 'Min', d.min)}${numField(i, 'max', 'Max', d.max)}${numField(i, 'value', 'Now', d.value)}</div>
-    <details class="options"><summary>Options</summary>${options}</details>
-  </section>`;
+    <div class="type-chips">${TYPE_TABS.map(([k, label]) => `<button type="button" class="${k === t ? 'on' : ''}" data-action="dial-set" data-key="tab" data-value="${k}" ${attrs}>${label}</button>`).join('')}</div>
+    ${t === 'pressure' ? seg('dial-set', 'type', d.type, [['psi', 'psi'], ['bar', 'bar']], attrs) : ''}
+    ${t === 'custom' ? `<input class="unit-input" data-bind="dials.${i}.unit" value="${esc(d.unit)}" placeholder="Unit, e.g. % or mm" autocomplete="off">` : ''}
+    <div class="steppers">
+      ${stepperRow(i, 'min', t === 'clicks' ? 'Lowest' : 'Min', d.min)}
+      ${stepperRow(i, 'max', t === 'clicks' ? 'Total clicks' : 'Max', d.max)}
+      ${stepperRow(i, 'value', 'Current', d.value)}
+    </div>
+    ${t === 'turns' ? `<div class="field"><span>Snaps every</span>${seg('dial-set', 'step', d.step, [[0.25, '¼ turn'], [0.125, '⅛ turn'], [0.0625, '1/16']], attrs)}</div>` : ''}
+    ${t === 'custom' ? stepperRow(i, 'step', 'Step', d.step) : ''}
+    <div class="field"><span>Control</span>${seg('dial-set', 'control', d.control, [['dial', 'Dial'], ['slider', 'Slider']], attrs)}</div>
+    ${isSlider(d) ? '' : `<div class="field"><span>Clockwise</span>${seg('dial-set', 'reverse', d.reverse, [[false, 'Increases'], [true, 'Decreases']], attrs)}</div>`}
+    <div class="sheet-actions">
+      <button type="button" class="btn danger-text" data-action="del-dial" ${attrs}>Remove</button>
+      <button type="button" class="btn primary" data-action="close-sheet">Done</button>
+    </div>
+  </div>`;
+}
+
+function openDialSheet(i) {
+  openSheet(dialSheetHtml(i));
+}
+
+// Redraw the open dial sheet in place (keeps it open, keeps scroll).
+function refreshDialSheet(i) {
+  const el = document.querySelector('[data-dial-sheet]');
+  if (!el) return;
+  const focused = document.activeElement?.dataset?.bind;
+  el.outerHTML = dialSheetHtml(i);
+  if (focused) document.querySelector(`.sheet [data-bind="${focused}"]`)?.focus();
+}
+
+// How far − / + move each field.
+function fieldStep(d, key) {
+  if (key === 'step') return d.type === 'custom' ? 1 : d.step;
+  if (key !== 'value' && d.type === 'psi') return 5;
+  if (key !== 'value' && d.type === 'bar') return 0.5;
+  return d.step;
+}
+
+// Keep min < max and the current value inside the range, on the step grid.
+function normalizeDial(d) {
+  const t = TYPES[d.type];
+  d.step = d.type === 'clicks' || d.type === 'spacers' ? 1 : d.step > 0 ? d.step : t.step;
+  d.min = d.min ?? t.min;
+  d.max = d.max ?? t.max;
+  if (d.max <= d.min) d.max = +(d.min + d.step).toFixed(4);
+  const v = clamp(d.value ?? d.min, d.min, d.max);
+  d.value = +(d.min + Math.round((v - d.min) / d.step) * d.step).toFixed(4);
+}
+
+function nudgeField(i, key, dir) {
+  const d = draft.dials[i];
+  const st = fieldStep(d, key);
+  let v = +((d[key] ?? 0) + dir * st).toFixed(4);
+  if (key === 'min') v = Math.max(0, Math.min(v, d.max - d.step));
+  if (key === 'max') v = Math.max(v, d.min + d.step);
+  if (key === 'value') v = clamp(v, d.min, d.max);
+  if (key === 'step') v = Math.max(0.01, v);
+  if (v === d[key]) { buzz(30); return; }
+  d[key] = v;
+  normalizeDial(d);
+  buzz(5);
+  const sheet = document.querySelector('[data-dial-sheet]');
+  for (const k of ['min', 'max', 'value', 'step']) {
+    const input = sheet?.querySelector(`[data-bind="dials.${i}.${k}"]`);
+    if (input && input !== document.activeElement) input.value = trim(d[k], 3);
+  }
+  commitSoon();
 }
 
 function setPath(obj, path, value) {
@@ -923,25 +1000,25 @@ function setDialType(d, type) {
   }
 }
 
-async function saveComponent() {
-  const name = draft.name.trim();
-  if (!name) { toast('Give it a name'); $app.querySelector('[data-bind="name"]').focus(); return; }
-  for (const d of draft.dials) {
-    d.name = d.name.trim();
-    if (!d.name) { toast('Every dial needs a name'); return; }
-    const t = TYPES[d.type];
-    d.min = d.min ?? t.min;
-    d.max = d.max ?? t.max;
-    d.step = d.type === 'clicks' || d.type === 'spacers' ? 1 : d.step > 0 ? d.step : t.step;
-    if (d.max <= d.min) { toast(`${d.name}: the top value must be above the bottom one`); return; }
-    const v = clamp(d.value ?? d.min, d.min, d.max);
-    d.value = +(d.min + Math.round((v - d.min) / d.step) * d.step).toFixed(4);
-  }
-  const { _new, ...comp } = draft;
-  comp.name = name;
-  comp.bike = comp.bike.trim();
+// Setup changes save as you make them.
+function commitDraft() {
+  clearTimeout(commitTimer);
+  if (!draft) return;
+  const exists = state.components.some((c) => c.id === draft.id);
+  if (!exists && !draft.name.trim() && !draft.dials.length) return; // nothing entered yet
+  const { _new, ...comp } = structuredClone(draft);
+  comp.name = comp.name.trim() || kindLabel(comp.kind);
+  comp.bike = (comp.bike || '').trim();
+  comp.dials.forEach((d) => { d.name = d.name.trim() || 'Dial'; normalizeDial(d); });
   const i = state.components.findIndex((c) => c.id === comp.id);
   if (i >= 0) state.components[i] = comp; else state.components.push(comp);
+  if (!exists) {
+    state.settings.lastPage = comp.id;
+    // It exists now: show it as a normal setup page (with Delete) from here on.
+    draft._new = false;
+    history.replaceState(null, '', `#/component/${comp.id}`);
+    currentHash = location.hash;
+  }
   // Drop or clamp pending dial moves that no longer fit the setup.
   const p = state.pending[comp.id];
   if (p) {
@@ -950,16 +1027,18 @@ async function saveComponent() {
       if (!d) delete p[id]; else setPending(comp, d, clamp(p[id], d.min, d.max));
     }
   }
-  if (_new) {
-    state.entries.push({ id: uid(), componentId: comp.id, ts: Date.now(), start: true, changes: [], tags: [], note: '',
-      snapshot: Object.fromEntries(comp.dials.map((d) => [d.id, d.value])) });
+  // Until something is logged, the starting setup tracks what's entered here.
+  const snapshot = Object.fromEntries(comp.dials.map((d) => [d.id, d.value]));
+  const list = entriesFor(comp.id);
+  if (!list.length) {
+    state.entries.push({ id: uid(), componentId: comp.id, ts: Date.now(), start: true, changes: [], tags: [], note: '', snapshot });
+  } else if (list.length === 1 && list[0].start) {
+    list[0].snapshot = snapshot;
   }
-  state.settings.lastPage = comp.id;
-  await save();
-  dirty = false;
-  toast('Saved');
-  location.hash = '#/';
+  saveSoon();
 }
+let commitTimer;
+const commitSoon = () => { clearTimeout(commitTimer); commitTimer = setTimeout(commitDraft, 300); };
 
 /* ---------- view: settings ---------- */
 
@@ -1070,6 +1149,7 @@ function render() {
 
 let currentHash = location.hash;
 window.addEventListener('hashchange', () => {
+  commitDraft();
   if (dirty && !confirm('Discard unsaved changes?')) {
     history.pushState(null, '', currentHash || '#/');
     return;
@@ -1147,6 +1227,7 @@ document.addEventListener('click', async (ev) => {
     saveNow(compById(el.dataset.id));
   } else if (action === 'close-sheet') {
     closeSheet();
+    if (draft) { commitDraft(); rerenderKeepScroll(); }
   } else if (action === 'entry-tag') {
     const e = entryById(el.dataset.id);
     const t = el.textContent;
@@ -1170,10 +1251,15 @@ document.addEventListener('click', async (ev) => {
     location.hash = compById(e.componentId) ? `#/history/${e.componentId}` : '#/';
   } else if (action === 'draft-set') {
     setPath(draft, el.dataset.key, el.dataset.value);
-    dirty = true;
+    commitDraft();
     rerenderKeepScroll();
+  } else if (action === 'edit-dial') {
+    openDialSheet(+el.dataset.index);
+  } else if (action === 'pick-preset') {
+    openPresetSheet();
   } else if (action === 'dial-set') {
-    const d = draft.dials[+el.dataset.index];
+    const i = +el.dataset.index;
+    const d = draft.dials[i];
     const { key, value } = el.dataset;
     if (key === 'tab') setDialType(d, value === 'pressure' ? 'psi' : value);
     else if (key === 'type') setDialType(d, value);
@@ -1181,28 +1267,29 @@ document.addEventListener('click', async (ev) => {
     else if (key === 'reverse') d.reverse = value === 'true';
     else if (key === 'control') d.control = value;
     else if (key === 'main') d.main = value === 'true';
-    dirty = true;
+    normalizeDial(d);
+    commitDraft();
+    refreshDialSheet(i);
     rerenderKeepScroll();
+  } else if (action === 'nudge-field') {
+    if (holdFired) { holdFired = false; return; } // a held press already stepped
+    nudgeField(+el.dataset.index, el.dataset.key, +el.dataset.dir);
   } else if (action === 'add-dial') {
     const preset = PRESETS[+el.dataset.preset];
     const d = preset ? newDial(preset[0], preset[1], preset[2]) : newDial('', 'clicks');
-    if (d.type === 'psi') d.value = draft.kind === 'shock' ? 180 : 80;
+    // Start pressure on a realistic range for the part; it can go up to 600 psi.
+    if (d.type === 'psi') Object.assign(d, draft.kind === 'shock' ? { min: 100, max: 400, value: 180 } : { min: 30, max: 200, value: 80 });
     if (d.type === 'clicks') d.value = Math.round(d.max / 2);
     draft.dials.push(d);
-    dirty = true;
+    commitDraft();
     rerenderKeepScroll();
-    if (!preset) [...$app.querySelectorAll('.dial-edit-head input')].at(-1)?.focus();
+    openDialSheet(draft.dials.length - 1);
+    if (!preset) setTimeout(() => document.querySelector('.dial-sheet .name-input')?.focus(), 250);
   } else if (action === 'del-dial') {
     draft.dials.splice(+el.dataset.index, 1);
-    dirty = true;
+    commitDraft();
+    closeSheet();
     rerenderKeepScroll();
-  } else if (action === 'move-dial') {
-    const i = +el.dataset.index, j = i + +el.dataset.dir;
-    [draft.dials[i], draft.dials[j]] = [draft.dials[j], draft.dials[i]];
-    dirty = true;
-    rerenderKeepScroll();
-  } else if (action === 'save-component') {
-    saveComponent();
   } else if (action === 'delete-component') {
     const n = state.entries.filter((e) => e.componentId === draft.id).length;
     if (!confirm(`Delete ${draft.name || 'this profile'} and its ${n} history entr${n === 1 ? 'y' : 'ies'}? This can't be undone.`)) return;
@@ -1246,20 +1333,39 @@ document.addEventListener('input', (ev) => {
     let v = t.value;
     if (t.dataset.type === 'num') v = num(v);
     setPath(draft, t.dataset.bind, v);
-    dirty = true;
     // Keep the colour swatch in step with the dial name.
     const m = t.dataset.bind.match(/^dials\.(\d+)\.name$/);
-    if (m) t.previousElementSibling.className = `sw big c-${dialColor(draft.dials[+m[1]])}`;
+    const sw = t.closest('.ds-head')?.querySelector('.sw');
+    if (m && sw) sw.className = `sw big c-${dialColor(draft.dials[+m[1]])}`;
+    if (t.dataset.type !== 'num') commitSoon();
   }
 });
 
 document.addEventListener('change', (ev) => {
   const t = ev.target;
+  // Typed numbers are tidied up once you leave the box.
+  if (t.dataset.type === 'num' && draft) {
+    const m = t.dataset.bind.match(/^dials\.(\d+)\./);
+    if (m) { normalizeDial(draft.dials[+m[1]]); refreshDialSheet(+m[1]); }
+    commitDraft();
+  }
   if (t.dataset.action === 'import' && t.files[0]) importData(t.files[0]);
 });
 
+// Hold − / + in setup to keep stepping (handy for pressure ranges).
+let holdTimer = null, holdFired = false;
+document.addEventListener('pointerdown', (e) => {
+  const b = e.target.closest('[data-action="nudge-field"]');
+  if (!b) return;
+  holdFired = false;
+  const step = () => { holdFired = true; nudgeField(+b.dataset.index, b.dataset.key, +b.dataset.dir); };
+  holdTimer = setTimeout(function repeat() { step(); holdTimer = setTimeout(repeat, 70); }, 420);
+});
+const stopHold = () => { clearTimeout(holdTimer); holdTimer = null; };
+['pointerup', 'pointercancel', 'pointerleave'].forEach((t) => document.addEventListener(t, stopHold, true));
+
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden' && state) save();
+  if (document.visibilityState === 'hidden' && state) { commitDraft(); save(); }
 });
 
 /* ---------- persistence + updates ---------- */
