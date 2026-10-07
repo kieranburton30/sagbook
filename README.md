@@ -10,6 +10,11 @@ on-the-fly changes) and **Workshop** (pressure, volume spacers, preload:
 slower jobs). Clockwise always means more damping (firmer compression,
 slower rebound); anticlockwise means less.
 
+**Setups** (the chip at the top left of each page, e.g. "Standard ▾") hold
+separate values for different configurations such as a 160/170 flip chip.
+Setups with the same name on the fork and shock switch together, and every
+switch is logged in history.
+
 Set up profiles under **Settings → Forks & shocks**: for each dial choose
 clicks, turns, pressure, spacers or a custom unit, its min, max and current
 position, and whether it lives on the Trailside or Workshop page.

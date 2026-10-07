@@ -149,7 +149,15 @@ svg { flex: none; }
 }
 
 /* trailside / workshop */
-.sections { flex: none; display: flex; gap: 2px; padding: 3px; margin: 4px auto 0; border-radius: 999px; background: var(--card); }
+.page-bar { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 4px; }
+.sections { flex: none; display: flex; gap: 2px; padding: 3px; border-radius: 999px; background: var(--card); }
+.setup-chip {
+  display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 48%; height: 38px; padding: 0 12px;
+  border: 0; border-radius: 999px; background: var(--card); color: var(--text); font-weight: 750; font-size: 14px; cursor: pointer;
+}
+.setup-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.setup-chip svg { color: var(--muted); }
+.setup-chip:active { background: var(--field); }
 .sections button {
   border: 0; background: transparent; color: var(--muted); font-weight: 750; font-size: 14px;
   padding: 7px 16px; border-radius: 999px; cursor: pointer; display: inline-flex; align-items: center;
@@ -568,3 +576,25 @@ textarea { resize: vertical; }
 .dial-sheet .field { margin: 0; }
 .dial-sheet .sheet-actions { margin-top: 4px; grid-template-columns: 1fr 2fr; }
 .btn.danger-text { color: var(--danger); background: transparent; }
+
+/* ---------- setups sheet ---------- */
+.setup-list { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+.setup-row { display: flex; align-items: center; gap: 2px; border-radius: 14px; background: var(--field); border: 1.5px solid transparent; }
+.setup-row.on { border-color: var(--accent); background: var(--accent-soft); }
+.setup-pick { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; padding: 12px; border: 0; background: transparent; text-align: left; cursor: pointer; }
+.radio { flex: none; width: 20px; height: 20px; border-radius: 50%; border: 2px solid var(--muted); }
+.setup-row.on .radio { border-color: var(--accent); box-shadow: inset 0 0 0 4px var(--field), inset 0 0 0 10px var(--accent); }
+.sr-text { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.sr-text b { font-size: 16px; }
+.sr-text small { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sr-text .linked { display: inline-flex; align-items: center; gap: 4px; }
+.sr-text .linked svg { width: 12px; height: 12px; }
+.new-setup { display: flex; gap: 8px; margin-top: 12px; }
+.new-setup input { flex: 1; }
+.new-setup .btn { flex: none; padding: 0 20px; }
+[data-setup-sheet] .check { margin-top: 10px; font-size: 14px; }
+[data-setup-sheet] p.small { margin: 10px 0 0; }
+.chip-ch.switch { color: var(--text); }
+.chip-ch.switch svg { width: 14px; height: 14px; color: var(--accent); align-self: center; }
+.chip-ch.switch b { color: var(--accent); }
+.hist-setup { font-size: 12px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }

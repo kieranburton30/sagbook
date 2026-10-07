@@ -1,6 +1,6 @@
 // SagBook: suspension dial log. Plain JS, no build step.
 // tools/update.ps1 rewrites APP_VERSION on every publish.
-const APP_VERSION = '2026.10.07-1100';
+const APP_VERSION = '2026.10.07-1337';
 const PSI_PER_BAR = 14.5038;
 
 const $app = document.getElementById('app');
@@ -272,6 +272,113 @@ function selectedDial(comp) {
   return list.find((d) => d.id === state.settings.selected[`${comp.id}:${sec}`]) || list[0];
 }
 
+/* ---------- setups (e.g. 160 vs 170 flip chip, park vs trail) ---------- */
+
+// Each fork/shock can hold named setups. The dials always show the active
+// one; the others keep their own values (and any unsaved moves) until picked.
+const setupsOf = (comp) => comp.setups || [];
+const activeSetup = (comp) => setupsOf(comp).find((x) => x.id === comp.activeSetup) || null;
+const setupName = (comp) => activeSetup(comp)?.name || 'Standard';
+const sameName = (a, b) => a.trim().toLowerCase() === b.trim().toLowerCase();
+const snapshotOf = (comp) => Object.fromEntries(comp.dials.map((d) => [d.id, d.value]));
+
+function ensureSetups(comp) {
+  if (setupsOf(comp).length) return;
+  comp.setups = [{ id: uid(), name: 'Standard', values: snapshotOf(comp), pending: null }];
+  comp.activeSetup = comp.setups[0].id;
+}
+function syncActive(comp) {
+  const a = activeSetup(comp);
+  if (a) a.values = snapshotOf(comp);
+}
+
+function switchSetup(comp, target) {
+  const cur = activeSetup(comp);
+  if (!cur || cur.id === target.id) return false;
+  cur.values = snapshotOf(comp);
+  cur.pending = state.pending[comp.id] || null;
+  const changes = [];
+  for (const d of comp.dials) {
+    const raw = target.values?.[d.id];
+    if (raw == null) continue;
+    const v = clamp(raw, d.min, d.max);
+    if (v !== d.value) changes.push({ dialId: d.id, name: d.name, unit: unitOf(d), from: d.value, to: v });
+    d.value = v;
+  }
+  if (target.pending) state.pending[comp.id] = target.pending; else delete state.pending[comp.id];
+  target.pending = null;
+  comp.activeSetup = target.id;
+  state.entries.push({
+    id: uid(), componentId: comp.id, ts: Date.now(), setupId: target.id, switched: { from: cur.name, to: target.name },
+    changes, tags: [], note: '', snapshot: snapshotOf(comp),
+  });
+  return true;
+}
+
+// Setups with the same name switch together, so one flip chip moves fork and shock.
+function switchByName(name) {
+  const switched = [];
+  for (const c of state.components) {
+    const t = setupsOf(c).find((x) => sameName(x.name, name));
+    if (t && switchSetup(c, t)) switched.push(c.name);
+  }
+  return switched;
+}
+
+function createSetup(comp, name, everywhere) {
+  for (const c of everywhere ? state.components : [comp]) {
+    ensureSetups(c);
+    if (setupsOf(c).some((x) => sameName(x.name, name))) continue;
+    c.setups.push({ id: uid(), name, values: snapshotOf(c), pending: null });
+  }
+}
+
+const abbr = (n) => (n.length <= 4 ? n : /\s/.test(n.trim()) ? n.trim().split(/\s+/).map((w) => w[0]).join('').toUpperCase() : n.slice(0, 3));
+function setupSummary(comp, values) {
+  return comp.dials.slice(0, 5).map((d) => {
+    const v = fmt(d, values?.[d.id] ?? d.value);
+    if (d.type === 'psi' || d.type === 'bar') return `${v} ${d.type}`;
+    if (d.type === 'spacers') return `${v} spacer${v === '1' ? '' : 's'}`;
+    return `${abbr(d.name)} ${v}`;
+  }).join(' · ');
+}
+
+function setupSheetHtml(comp) {
+  ensureSetups(comp);
+  const others = (x) => state.components.filter((c) => c !== comp && setupsOf(c).some((o) => sameName(o.name, x.name))).map((c) => c.name);
+  return `<div data-setup-sheet="${comp.id}">
+    <h3>Setups</h3>
+    <p class="muted sheet-sub">${esc(comp.name)} · same-named setups switch together</p>
+    <div class="setup-list">${setupsOf(comp).map((x) => {
+      const on = x.id === comp.activeSetup;
+      const linked = others(x);
+      return `<div class="setup-row ${on ? 'on' : ''}">
+        <button type="button" class="setup-pick" data-action="pick-setup" data-comp="${comp.id}" data-id="${x.id}">
+          <span class="radio"></span>
+          <span class="sr-text"><b>${esc(x.name)}</b><small>${esc(setupSummary(comp, on ? snapshotOf(comp) : x.values))}</small>
+          ${linked.length ? `<small class="linked">${ICON.layers}${esc(linked.join(', '))}</small>` : ''}</span>
+        </button>
+        <button type="button" class="icon-btn subtle" data-action="rename-setup" data-comp="${comp.id}" data-id="${x.id}" aria-label="Rename ${esc(x.name)}">${ICON.edit}</button>
+        ${on ? '<span class="icon-btn"></span>' : `<button type="button" class="icon-btn subtle" data-action="delete-setup" data-comp="${comp.id}" data-id="${x.id}" aria-label="Delete ${esc(x.name)}">${ICON.x}</button>`}
+      </div>`;
+    }).join('')}</div>
+    <div class="new-setup">
+      <input data-new-setup placeholder="New setup, e.g. 170 mm" autocomplete="off" aria-label="New setup name">
+      <button type="button" class="btn primary" data-action="add-setup" data-comp="${comp.id}">Add</button>
+    </div>
+    ${state.components.length > 1 ? '<label class="check"><input type="checkbox" data-new-all checked> Add to every fork &amp; shock</label>' : ''}
+    <p class="muted small">A new setup starts from your current settings. Pick it, then spin the dials to suit.</p>
+  </div>`;
+}
+
+function openSetupSheet(comp) {
+  openSheet(setupSheetHtml(comp));
+}
+function refreshSetupSheet(comp) {
+  const el = document.querySelector('[data-setup-sheet]');
+  if (el) el.outerHTML = setupSheetHtml(comp);
+}
+
 function setPending(comp, d, v) {
   const p = (state.pending[comp.id] ||= {});
   if (v === d.value) delete p[d.id]; else p[d.id] = v;
@@ -294,6 +401,9 @@ const ICON = {
   cw: svg('<path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/>', 16),
   ccw: svg('<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>', 16),
   x: svg('<path d="M18 6L6 18M6 6l12 12"/>', 20),
+  edit: svg('<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>', 18),
+  layers: svg('<path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/>', 16),
+  caret: svg('<path d="M6 9l6 6 6-6"/>', 14),
 };
 
 const header = (title, left = '', right = '<span class="icon-btn"></span>') =>
@@ -377,7 +487,10 @@ function pageHtml(comp) {
   }
   const list = dialsIn(comp, activeSection(comp));
   return `<section class="page" data-comp="${comp.id}">
-    ${sectionTabs(comp)}
+    <div class="page-bar">
+      <button type="button" class="setup-chip" data-action="open-setups" data-comp="${comp.id}">${ICON.layers}<span>${esc(setupName(comp))}</span>${ICON.caret}</button>
+      ${sectionTabs(comp)}
+    </div>
     ${heroHtml(comp, sel)}
     ${list.length > 1 ? `<div class="tiles">${list.map((d) => tileHtml(comp, d, d === sel)).join('')}</div>` : ''}
     ${saveBar(comp)}
@@ -754,10 +867,11 @@ async function saveNow(comp) {
   for (const d of changed) d.value = current(comp, d);
   delete state.pending[comp.id];
   const entry = {
-    id: uid(), componentId: comp.id, ts: Date.now(), changes, tags: [], note: '',
-    snapshot: Object.fromEntries(comp.dials.map((d) => [d.id, d.value])),
+    id: uid(), componentId: comp.id, ts: Date.now(), setupId: comp.activeSetup || null, changes, tags: [], note: '',
+    snapshot: snapshotOf(comp),
   };
   state.entries.push(entry);
+  syncActive(comp);
   await save();
   buzz(25);
   rerenderKeepScroll();
@@ -781,8 +895,9 @@ function openValueSheet(comp, d) {
 
 function changeChips(e, comp) {
   if (e.start) return '<span class="chip-ch start">Starting setup</span>';
-  if (!e.changes.length) return '<span class="muted">No dial changes</span>';
-  return e.changes.map((c) => {
+  const head = e.switched ? `<span class="chip-ch switch">${ICON.layers} Switched to <b>${esc(e.switched.to)}</b></span>` : '';
+  if (!e.changes.length) return head || '<span class="muted">No dial changes</span>';
+  return head + e.changes.map((c) => {
     const d = comp?.dials.find((x) => x.id === c.dialId);
     const up = c.to > c.from;
     return `<span class="chip-ch"><span>${esc(d?.name || c.name)}</span> ${fmtChange(d, c.from)} <i class="${up ? 'up' : 'down'}">→</i> <b>${fmtChange(d, c.to)}</b><em>${esc(effectText(d || { name: c.name }, c.from, c.to).replace(/^[+−]\S+ /, ''))}</em></span>`;
@@ -801,6 +916,7 @@ function viewHistory(id) {
     return `${head}<li><a class="hist" href="#/entry/${e.id}">
       <time>${fmtTime(e.ts)}</time>
       <div class="hist-body">
+        ${!e.switched && setupsOf(comp).length > 1 && e.setupId ? `<div class="hist-setup">${esc(setupsOf(comp).find((x) => x.id === e.setupId)?.name || '')}</div>` : ''}
         <div class="chgs">${changeChips(e, comp)}</div>
         ${e.tags?.length ? `<div class="tags">${e.tags.map((t) => `<span class="tag on small">${esc(t)}</span>`).join('')}</div>` : ''}
         ${e.note ? `<div class="note">${esc(e.note)}</div>` : ''}
@@ -1027,8 +1143,9 @@ function commitDraft() {
       if (!d) delete p[id]; else setPending(comp, d, clamp(p[id], d.min, d.max));
     }
   }
+  syncActive(comp);
   // Until something is logged, the starting setup tracks what's entered here.
-  const snapshot = Object.fromEntries(comp.dials.map((d) => [d.id, d.value]));
+  const snapshot = snapshotOf(comp);
   const list = entriesFor(comp.id);
   if (!list.length) {
     state.entries.push({ id: uid(), componentId: comp.id, ts: Date.now(), start: true, changes: [], tags: [], note: '', snapshot });
@@ -1223,6 +1340,48 @@ document.addEventListener('click', async (ev) => {
     delete state.pending[el.dataset.id];
     await save();
     rerenderKeepScroll();
+  } else if (action === 'open-setups') {
+    openSetupSheet(compById(el.dataset.comp));
+  } else if (action === 'pick-setup') {
+    const comp = compById(el.dataset.comp);
+    const target = setupsOf(comp).find((x) => x.id === el.dataset.id);
+    if (target.id === comp.activeSetup) { closeSheet(); return; }
+    const switched = switchByName(target.name);
+    await save();
+    closeSheet();
+    buzz(20);
+    rerenderKeepScroll();
+    toast(`${target.name}${switched.length > 1 ? ` on ${switched.join(' & ')}` : ''} — set the bike to match`);
+  } else if (action === 'add-setup') {
+    const comp = compById(el.dataset.comp);
+    const input = document.querySelector('[data-new-setup]');
+    const name = input.value.trim();
+    if (!name) { toast('Name the setup first'); input.focus(); return; }
+    if (setupsOf(comp).some((x) => sameName(x.name, name))) { toast('That setup already exists'); return; }
+    createSetup(comp, name, document.querySelector('[data-new-all]')?.checked ?? false);
+    switchByName(name);
+    await save();
+    closeSheet();
+    rerenderKeepScroll();
+    toast(`${name} created from your current settings — spin the dials to suit`);
+  } else if (action === 'rename-setup') {
+    const comp = compById(el.dataset.comp);
+    const x = setupsOf(comp).find((o) => o.id === el.dataset.id);
+    const name = prompt('Rename setup', x.name)?.trim();
+    if (!name || name === x.name) return;
+    // Keep linked setups linked: rename the same-named ones on other parts too.
+    for (const c of state.components) for (const o of setupsOf(c)) if (sameName(o.name, x.name) && o !== x) o.name = name;
+    x.name = name;
+    await save();
+    refreshSetupSheet(comp);
+    rerenderKeepScroll();
+  } else if (action === 'delete-setup') {
+    const comp = compById(el.dataset.comp);
+    const x = setupsOf(comp).find((o) => o.id === el.dataset.id);
+    if (!confirm(`Delete the ${x.name} setup from ${comp.name}?`)) return;
+    comp.setups = setupsOf(comp).filter((o) => o !== x);
+    await save();
+    refreshSetupSheet(comp);
   } else if (action === 'save-now') {
     saveNow(compById(el.dataset.id));
   } else if (action === 'close-sheet') {
@@ -1339,6 +1498,10 @@ document.addEventListener('input', (ev) => {
     if (m && sw) sw.className = `sw big c-${dialColor(draft.dials[+m[1]])}`;
     if (t.dataset.type !== 'num') commitSoon();
   }
+});
+
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter' && ev.target.matches?.('[data-new-setup]')) document.querySelector('[data-action="add-setup"]')?.click();
 });
 
 document.addEventListener('change', (ev) => {
